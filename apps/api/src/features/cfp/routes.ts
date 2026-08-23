@@ -24,6 +24,7 @@ export interface CfpRouteService
       CfpService,
       | "saveEvent"
       | "saveForm"
+      | "saveConfiguration"
       | "createDraft"
       | "saveDraft"
       | "review"
@@ -66,6 +67,14 @@ const saveFormSchema = z
   .object({
     form: cfpFormSchema,
     expectedVersion: expectedVersionSchema.nullable(),
+  })
+  .strict();
+const saveConfigurationSchema = z
+  .object({
+    event: eventCfpSchema,
+    form: cfpFormSchema,
+    expectedEventVersion: expectedVersionSchema.nullable(),
+    expectedFormVersion: expectedVersionSchema.nullable(),
   })
   .strict();
 const createFormSchema = z
@@ -435,6 +444,18 @@ export function createCfpRoutes(dependencies: CfpRouteDependencies): Hono<CfpRou
     assertEventPath(context, input.event, "event");
     return context.json({
       data: await dependencies.service.saveEvent(input.event, input.expectedVersion),
+    });
+  });
+  routes.put("/configuration", async (context) => {
+    organizer(context, routeParam(context, "organizationId"));
+    const input = await body(context, saveConfigurationSchema);
+    assertEventPath(context, input.event, "event");
+    assertEventPath(context, input.form, "form");
+    return context.json({
+      data: await dependencies.service.saveConfiguration({
+        ...input,
+        idempotencyKey: idempotencyKey(context),
+      }),
     });
   });
 

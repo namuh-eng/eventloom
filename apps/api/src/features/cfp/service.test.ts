@@ -195,6 +195,23 @@ class MemoryRepository implements CfpRepository {
     }
     this.forms.set(value.id, structuredClone(value));
   }
+  async saveConfiguration(
+    eventValue: EventCfp,
+    formValue: CfpForm,
+    expectedEventVersion: number | null,
+    expectedFormVersion: number | null,
+  ): Promise<void> {
+    const currentEvent = this.events.get(eventValue.id);
+    const currentForm = this.forms.get(formValue.id);
+    if (
+      currentEvent?.version !== expectedEventVersion ||
+      (currentForm?.version ?? null) !== expectedFormVersion
+    ) {
+      throw new CfpError("CONFLICT", "configuration version conflict");
+    }
+    this.events.set(eventValue.id, structuredClone(eventValue));
+    this.forms.set(formValue.id, structuredClone(formValue));
+  }
   async getReusableField(
     tenantId: string,
     fieldId: string,
@@ -549,6 +566,61 @@ async function completeValidDraft(
 }
 
 describe("CFP rules and configuration", () => {
+  it("saves valid conditional configuration atomically for creation and update", async () => {
+    const { service, repository } = createFixture();
+    const updated = await service.saveConfiguration({
+      event: { ...event, version: 2 },
+      form: buildForm({ version: 2 }),
+      expectedEventVersion: 1,
+      expectedFormVersion: 1,
+      idempotencyKey: "configuration-update",
+    });
+    expect(updated).toMatchObject({ event: { version: 2 }, form: { version: 2 } });
+    expect(await repository.getEvent("tenant_1", "event_1")).toMatchObject({ version: 2 });
+    expect(await repository.getForm("tenant_1", "form_1")).toMatchObject({ version: 2 });
+
+    const created = await service.saveConfiguration({
+      event: { ...event, version: 3 },
+      form: buildForm({ id: "form_2", version: 1 }),
+      expectedEventVersion: 2,
+      expectedFormVersion: null,
+      idempotencyKey: "configuration-create",
+    });
+    expect(created).toMatchObject({ event: { version: 3 }, form: { id: "form_2", version: 1 } });
+  });
+
+  it("does not advance either configuration record for invalid or stale versions", async () => {
+    const { service, repository } = createFixture();
+    await expect(
+      service.saveConfiguration({
+        event: { ...event, version: 2 },
+        form: buildForm({ version: 2, sections: [] }),
+        expectedEventVersion: 1,
+        expectedFormVersion: 1,
+        idempotencyKey: "configuration-invalid",
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(
+      service.saveConfiguration({
+        event: { ...event, version: 2 },
+        form: buildForm({ version: 2 }),
+        expectedEventVersion: 2,
+        expectedFormVersion: 1,
+        idempotencyKey: "configuration-stale-event",
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(
+      service.saveConfiguration({
+        event: { ...event, version: 2 },
+        form: buildForm({ version: 2 }),
+        expectedEventVersion: 1,
+        expectedFormVersion: 2,
+        idempotencyKey: "configuration-stale-form",
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await repository.getEvent("tenant_1", "event_1")).toMatchObject({ version: 1 });
+    expect(await repository.getForm("tenant_1", "form_1")).toMatchObject({ version: 1 });
+  });
   it("accepts nested routing rules and rejects dependency cycles", () => {
     expect(validateCfpForm(buildForm())).toMatchObject({ success: true });
 

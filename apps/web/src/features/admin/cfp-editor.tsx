@@ -26,6 +26,7 @@ import {
   closeCfpNowConfiguration,
   configurationFromServer,
   createEmptyCfpConfiguration,
+  cfpRuleFields,
   fieldKeyForRuleField,
   CANONICAL_TITLE_FIELD_KEY,
   fieldKeyFromLabel,
@@ -374,8 +375,17 @@ function useCfpEditorController({
   }
 
   function updatePrimaryCondition(patch: Partial<Omit<CfpCondition, "type" | "operator">>): void {
-    setConfiguration((current) => updateCfpShowWhenCondition(current, patch));
+    setConfiguration((current) => {
+      if (patch.field?.trim() !== "") return updateCfpShowWhenCondition(current, patch);
+      const { ruleTargetField: _ruleTargetField, ...configurationWithoutTarget } = current;
+      return {
+        ...configurationWithoutTarget,
+        rule: { type: "condition", field: "", operator: "is", value: "" },
+        ruleAction: "",
+      };
+    });
     setSaveState("idle");
+    setSaveError(null);
   }
 
   function updateHelpfulLink(index: number, patch: Partial<{ label: string; href: string }>): void {
@@ -413,13 +423,24 @@ function useCfpEditorController({
   }
 
   function updateRuleTarget(target: string): void {
-    const selectedTarget = configuration.fields.find((field) => (field.key ?? field.id) === target);
-    setConfiguration((current) => ({
-      ...current,
-      ruleTargetField: target,
-      ruleAction: selectedTarget ? `show ${selectedTarget.label}` : current.ruleAction,
-    }));
+    setConfiguration((current) => {
+      if (!target.trim()) {
+        return {
+          ...current,
+          rule: { type: "condition", field: "", operator: "is", value: "" },
+          ruleAction: "",
+          ruleTargetField: undefined,
+        };
+      }
+      const selectedTarget = current.fields.find((field) => (field.key ?? field.id) === target);
+      return {
+        ...current,
+        ruleTargetField: target,
+        ruleAction: selectedTarget ? `show ${selectedTarget.label}` : current.ruleAction,
+      };
+    });
     setSaveState("idle");
+    setSaveError(null);
   }
 
   function handlePreviewInput(): void {
@@ -664,39 +685,7 @@ function useCfpEditorController({
   );
   const ruleSummary = summarizeRule(configuration.rule);
   const primaryCondition = firstRuleCondition(configuration.rule);
-  const ruleFields = [
-    ...configuration.fields.map((field) =>
-      field.key === "format"
-        ? { ...field, options: configuration.formats }
-        : field.key === "track"
-          ? { ...field, options: configuration.tracks }
-          : field,
-    ),
-    ...[
-      {
-        id: "server-format",
-        key: "format",
-        label: "Format",
-        type: "select" as const,
-        kind: "select",
-        required: false,
-        visible: true,
-        placeholder: "",
-        options: configuration.formats,
-      },
-      {
-        id: "server-track",
-        key: "track",
-        label: "Track",
-        type: "select" as const,
-        kind: "select",
-        required: false,
-        visible: true,
-        placeholder: "",
-        options: configuration.tracks,
-      },
-    ].filter((field) => !configuration.fields.some((candidate) => candidate.key === field.key)),
-  ];
+  const ruleFields = cfpRuleFields(configuration);
   const selectedRuleFieldKey = fieldKeyForRuleField(primaryCondition.field, ruleFields);
   const selectedRuleField = ruleFields.find((field) => field.key === selectedRuleFieldKey);
   const selectedRuleOptions = fieldOptionValues(selectedRuleField);
@@ -743,6 +732,7 @@ function useCfpEditorController({
 
   function onConfirmPublish(): void {
     const expectedVersion = preparedPublishVersionRef.current;
+    preparedPublishVersionRef.current = null;
     setPublishDialogOpen(false);
     void handlePublish(expectedVersion);
   }

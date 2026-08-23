@@ -68,6 +68,7 @@ const migrationNames = [
   "0049_private_download_attribution.sql",
   "0050_private_object_cleanup.sql",
   "0052_shared_ai_triage.sql",
+  "0053_cfp_configuration_write_guards.sql",
 ] as const;
 
 class FakeR2Bucket {

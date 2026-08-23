@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { CfpApi } from "../cfp/api";
+import type { CfpApi, CfpFormConfiguration } from "../cfp/api";
 import { CfpEditor, CfpEventIdentityFields, CfpPastCloseConfirmation } from "./cfp-editor";
 import { createTestCfpConfiguration } from "./cfp-editor.test-fixtures";
 import {
@@ -11,8 +11,10 @@ import {
   cfpSectionScrollOffset,
   closeCfpNowConfiguration,
   closeCfpNowInstant,
+  cfpRuleFields,
   configurationFromServer,
   createEmptyCfpConfiguration,
+  fieldOptionValues,
   isCfpCloseDatePast,
   loadCfpEditorConfiguration,
   persistCfpConfiguration,
@@ -30,6 +32,60 @@ import {
 describe("CFP editor", () => {
   it("defaults new CFPs to twenty proposals per account", () => {
     expect(createEmptyCfpConfiguration("summit-2026").proposalLimit).toBe(20);
+  });
+  it("represents a new conditional rule as fully blank", () => {
+    const configuration = createEmptyCfpConfiguration("summit-2026");
+
+    expect(configuration.rule).toEqual({
+      type: "condition",
+      field: "",
+      operator: "is",
+      value: "",
+    });
+    expect(configuration.ruleTargetField).toBeUndefined();
+    expect(toFormConfiguration(configuration, "organization-1", "summit-2026").rules).toEqual([]);
+  });
+
+  it("resolves all taxonomy rule fields with authoritative options", () => {
+    const configuration = createTestCfpConfiguration("devflow-conf-2027");
+    configuration.formats = ["Workshop"];
+    configuration.tags = ["Accessibility"];
+    configuration.tracks = ["Community"];
+    configuration.levels = ["Advanced"];
+
+    expect(
+      cfpRuleFields(configuration)
+        .filter((field) =>
+          ["format", "tags", "track", "level", "language"].includes(field.key ?? ""),
+        )
+        .map((field) => [field.key, fieldOptionValues(field)]),
+    ).toEqual([
+      ["format", ["Workshop"]],
+      ["tags", ["Accessibility"]],
+      ["track", ["Community"]],
+      ["level", ["Advanced"]],
+      ["language", ["English"]],
+    ]);
+  });
+  it("saves a fully blank conditional rule without generating a rule", async () => {
+    const configuration = createTestCfpConfiguration("devflow-conf-2027");
+    configuration.rule = { type: "condition", field: "", operator: "is", value: "" };
+    configuration.ruleTargetField = undefined;
+    let savedRules: CfpFormConfiguration["rules"] | undefined;
+    const api = {
+      saveConfiguration: async (input: Parameters<CfpApi["saveConfiguration"]>[0]) => {
+        savedRules = input.form.rules;
+        return { event: input.event, form: input.form };
+      },
+    } as CfpApi;
+
+    await persistCfpConfiguration(api, {
+      configuration,
+      organizationId: "organization-1",
+      eventId: "devflow-conf-2027",
+      formId: "devflow-cfp",
+    });
+    expect(savedRules).toEqual([]);
   });
 
   it("blocks forward editor navigation until the current step is valid", () => {
@@ -242,14 +298,35 @@ describe("CFP editor", () => {
     );
   });
 
-  it("persists an explicitly confirmed past window and only reports success after both writes", async () => {
+  it("persists CFP configuration through one aggregate request and rehydrates its authoritative versions", async () => {
     const configuration = createTestCfpConfiguration("devflow-conf-2027");
     configuration.opensAt = "2026-08-01";
     configuration.closesAt = "2026-08-15";
     configuration.id = "devflow-cfp";
     configuration.eventVersion = 3;
     configuration.formVersion = 4;
-    const calls: string[] = [];
+    configuration.formats = ["Workshop"];
+    configuration.rule = {
+      type: "condition",
+      field: "format",
+      operator: "is",
+      value: "Workshop",
+    };
+    configuration.ruleTargetField = "prerequisites";
+    configuration.fields = [
+      ...configuration.fields,
+      {
+        id: "prerequisites",
+        key: "prerequisites",
+        label: "Prerequisites",
+        type: "textarea",
+        kind: "rich_text",
+        required: false,
+        visible: true,
+        placeholder: "",
+        options: [],
+      },
+    ];
     const savedEvent = {
       id: "devflow-conf-2027",
       tenantId: "organization-1",
@@ -265,14 +342,96 @@ describe("CFP editor", () => {
       version: 5,
       status: "draft" as const,
     };
+    let aggregateInput: Parameters<CfpApi["saveConfiguration"]>[0] | undefined;
     const api = {
-      saveEvent: async () => {
-        calls.push("event");
-        return savedEvent;
+      saveConfiguration: async (input: Parameters<CfpApi["saveConfiguration"]>[0]) => {
+        aggregateInput = input;
+        return { event: savedEvent, form: savedForm };
       },
-      saveForm: async () => {
-        calls.push("form");
-        return savedForm;
+    } as CfpApi;
+
+    await expect(
+      persistCfpConfiguration(api, {
+        configuration,
+        organizationId: "organization-1",
+        eventId: "devflow-conf-2027",
+        formId: "devflow-cfp",
+      }),
+    ).resolves.toEqual({ event: savedEvent, form: savedForm });
+    expect(aggregateInput).toMatchObject({
+      expectedEventVersion: 3,
+      expectedFormVersion: 4,
+      form: expect.objectContaining({
+        rules: expect.arrayContaining([
+          expect.objectContaining({
+            actions: [{ type: "show_field", fieldKey: "prerequisites" }],
+            when: expect.objectContaining({
+              conditions: [
+                expect.objectContaining({
+                  fieldKey: "format",
+                  operator: "equals",
+                  value: "Workshop",
+                }),
+              ],
+            }),
+          }),
+        ]),
+      }),
+    });
+    const rehydrated = configurationFromServer(configuration, savedEvent, savedForm);
+    expect(rehydrated.eventVersion).toBe(4);
+    expect(rehydrated.formVersion).toBe(5);
+    expect(rehydrated.closesAt).toBe("2026-08-15");
+  });
+
+  it("rejects every partial conditional rule before the aggregate request", async () => {
+    const partialRules = [
+      { field: "", value: "", target: "accessibility-notes" },
+      { field: "format", value: "", target: "" },
+      { field: "", value: "Workshop · 60 minutes", target: "" },
+      { field: "format", value: "Workshop · 60 minutes", target: "" },
+      { field: "", value: "Workshop · 60 minutes", target: "accessibility-notes" },
+      { field: "format", value: "", target: "accessibility-notes" },
+    ];
+    let calls = 0;
+    const api = {
+      saveConfiguration: async () => {
+        calls += 1;
+        throw new Error("should not be called");
+      },
+    } as unknown as CfpApi;
+
+    for (const partial of partialRules) {
+      const configuration = createTestCfpConfiguration("devflow-conf-2027");
+      configuration.rule = {
+        type: "condition",
+        field: partial.field,
+        operator: "is",
+        value: partial.value,
+      };
+      configuration.ruleTargetField = partial.target || undefined;
+      expect(
+        toFormConfiguration(configuration, "organization-1", "devflow-conf-2027").rules,
+      ).toEqual([]);
+      await expect(
+        persistCfpConfiguration(api, {
+          configuration,
+          organizationId: "organization-1",
+          eventId: "devflow-conf-2027",
+          formId: "devflow-cfp",
+        }),
+      ).rejects.toThrow(/Conditional rule/);
+    }
+    expect(calls).toBe(0);
+  });
+
+  it("does not advance local versions when the aggregate save rejects", async () => {
+    const configuration = createTestCfpConfiguration("devflow-conf-2027");
+    configuration.eventVersion = 3;
+    configuration.formVersion = 4;
+    const api = {
+      saveConfiguration: async () => {
+        throw new Error("aggregate persistence failed");
       },
     } as unknown as CfpApi;
 
@@ -283,26 +442,9 @@ describe("CFP editor", () => {
         eventId: "devflow-conf-2027",
         formId: "devflow-cfp",
       }),
-    ).resolves.toEqual({ event: savedEvent, form: savedForm });
-    expect(calls).toEqual(["event", "form"]);
-    expect(configurationFromServer(configuration, savedEvent, savedForm).closesAt).toBe(
-      "2026-08-15",
-    );
-
-    const partialApi = {
-      saveEvent: async () => savedEvent,
-      saveForm: async () => {
-        throw new Error("form persistence failed");
-      },
-    } as unknown as CfpApi;
-    await expect(
-      persistCfpConfiguration(partialApi, {
-        configuration,
-        organizationId: "organization-1",
-        eventId: "devflow-conf-2027",
-        formId: "devflow-cfp",
-      }),
-    ).rejects.toThrow("form persistence failed");
+    ).rejects.toThrow("aggregate persistence failed");
+    expect(configuration.eventVersion).toBe(3);
+    expect(configuration.formVersion).toBe(4);
   });
 
   it("loads CFP dates in the event timezone instead of slicing UTC dates", () => {
@@ -345,11 +487,10 @@ describe("CFP editor", () => {
     loaded.welcomeBody = "An unrelated copy edit.";
     let savedEventInput: unknown;
     const api = {
-      saveEvent: async (input: Parameters<CfpApi["saveEvent"]>[0]) => {
+      saveConfiguration: async (input: Parameters<CfpApi["saveConfiguration"]>[0]) => {
         savedEventInput = input.event;
-        return input.event;
+        return { event: input.event, form: input.form };
       },
-      saveForm: async (input: Parameters<CfpApi["saveForm"]>[0]) => input.form,
     } as CfpApi;
 
     await persistCfpConfiguration(api, {
@@ -383,11 +524,10 @@ describe("CFP editor", () => {
     loaded.opensAt = "2027-01-06";
     let savedEventInput: unknown;
     const api = {
-      saveEvent: async (input: Parameters<CfpApi["saveEvent"]>[0]) => {
+      saveConfiguration: async (input: Parameters<CfpApi["saveConfiguration"]>[0]) => {
         savedEventInput = input.event;
-        return input.event;
+        return { event: input.event, form: input.form };
       },
-      saveForm: async (input: Parameters<CfpApi["saveForm"]>[0]) => input.form,
     } as CfpApi;
 
     await persistCfpConfiguration(api, {
@@ -667,6 +807,7 @@ describe("CFP editor", () => {
 
   it("keeps show-when semantics and rule references when a target key is edited", () => {
     const configuration = createTestCfpConfiguration("devflow-conf-2027");
+    configuration.formats = ["Talk (30 min)", "Workshop (120 min)"];
     configuration.rule = {
       type: "condition",
       field: "format",
@@ -719,6 +860,7 @@ describe("CFP editor", () => {
 
   it("round-trips equals Workshop to show_field prerequisites without inversion", () => {
     const configuration = createTestCfpConfiguration("devflow-conf-2027");
+    configuration.formats = ["Workshop"];
     configuration.rule = {
       type: "condition",
       field: "format",
@@ -770,24 +912,50 @@ describe("CFP editor", () => {
       opensAt: "2027-01-01T00:00:00.000Z",
       closesAt: "2027-02-01T00:00:00.000Z",
     };
+    const unrelatedRule = {
+      id: "published-routing-rule",
+      priority: 20,
+      when: {
+        type: "group",
+        operator: "all",
+        conditions: [
+          {
+            type: "predicate",
+            fieldKey: "track",
+            operator: "equals",
+            value: "Product craft",
+          },
+        ],
+      },
+      actions: [{ type: "route", destination: "product-review" }],
+    };
     const persistedForm = {
       ...form,
-      rules: form.rules.map((rule) =>
-        rule.id === "editor-conditional-rule"
-          ? { ...rule, id: "rule-workshop-prerequisites", priority: 10 }
-          : rule,
-      ),
+      rules: [
+        ...form.rules.map((rule) =>
+          rule.id === "editor-conditional-rule"
+            ? { ...rule, id: "rule-workshop-prerequisites", priority: 10 }
+            : rule,
+        ),
+        unrelatedRule,
+      ],
     };
-    const restored = configurationFromServer(configuration, event, persistedForm);
+    const restored = configurationFromServer(
+      createEmptyCfpConfiguration("devflow-conf-2027"),
+      event,
+      persistedForm,
+    );
     expect(restored.rule).toEqual(configuration.rule);
     expect(restored.ruleTargetField).toBe("prerequisites");
     expect(restored.editorRuleId).toBe("rule-workshop-prerequisites");
 
     const roundTripped = toFormConfiguration(restored, "ai-engineer", "devflow-conf-2027");
-    expect(roundTripped.rules).toHaveLength(form.rules.length);
+    expect(roundTripped.rules).toHaveLength(persistedForm.rules.length);
+    expect(roundTripped.rules).toContainEqual(unrelatedRule);
     expect(roundTripped.rules).toContainEqual(
       expect.objectContaining({
         id: "rule-workshop-prerequisites",
+        priority: 10,
         when: expect.objectContaining({
           operator: "all",
           conditions: [expect.objectContaining({ operator: "equals", value: "Workshop" })],
@@ -906,6 +1074,54 @@ describe("CFP editor", () => {
         },
       }),
     );
+  });
+  it("preserves nonrepresentable show-field rules without claiming editor ownership", () => {
+    const current = createTestCfpConfiguration("devflow-conf-2027");
+    const event = {
+      id: "devflow-conf-2027",
+      tenantId: "ai-engineer",
+      version: 1,
+      slug: "devflow-conf-2027",
+      name: current.eventName,
+      timezone: current.timezone,
+      opensAt: "2027-01-01T00:00:00.000Z",
+      closesAt: "2027-02-01T00:00:00.000Z",
+    };
+    const baseForm = toFormConfiguration(current, "ai-engineer", "devflow-conf-2027");
+    const unsupportedRule = {
+      id: "external-show-rule",
+      priority: 37,
+      when: {
+        type: "group",
+        operator: "all",
+        conditions: [
+          {
+            type: "predicate",
+            fieldKey: "format",
+            operator: "contains",
+            value: "Workshop",
+          },
+        ],
+      },
+      actions: [{ type: "show_field", fieldKey: "accessibility-notes" }],
+    };
+    const persistedForm = { ...baseForm, rules: [unsupportedRule] };
+
+    const restored = configurationFromServer(
+      createEmptyCfpConfiguration("devflow-conf-2027"),
+      event,
+      persistedForm,
+    );
+    expect(restored.editorRuleId).toBeUndefined();
+    expect(restored.rule).toEqual({
+      type: "condition",
+      field: "",
+      operator: "is",
+      value: "",
+    });
+    expect(toFormConfiguration(restored, "ai-engineer", "devflow-conf-2027").rules).toEqual([
+      unsupportedRule,
+    ]);
   });
 
   it("omits empty optional taxonomy fields from persisted forms", () => {

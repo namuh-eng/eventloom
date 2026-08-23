@@ -508,6 +508,15 @@ export interface CfpApi {
     expectedVersion: number | null;
     idempotencyKey?: string;
   }): Promise<CfpFormConfiguration>;
+  saveConfiguration(input: {
+    organizationId: string;
+    eventId: string;
+    event: CfpEventConfiguration;
+    form: CfpFormConfiguration;
+    expectedEventVersion: number | null;
+    expectedFormVersion: number | null;
+    idempotencyKey?: string;
+  }): Promise<{ event: CfpEventConfiguration; form: CfpFormConfiguration }>;
   createForm(input: {
     organizationId: string;
     eventId: string;
@@ -1175,6 +1184,23 @@ export function createCfpApi(baseUrl: string, fetcher: Fetcher = fetch): CfpApi 
           method: "PUT",
           headers: { "idempotency-key": key("cfp-event-save", input.idempotencyKey) },
           body: JSON.stringify({ event: input.event, expectedVersion: input.expectedVersion }),
+        },
+      );
+    },
+    async saveConfiguration(input) {
+      const form = normalizeCfpFormPayload(input.form);
+      return request(
+        `${apiBase}${resourcePath(input.organizationId, input.eventId)}/configuration`,
+        z.object({ event: eventSchema, form: formSchema }),
+        {
+          method: "PUT",
+          headers: { "idempotency-key": key("cfp-configuration-save", input.idempotencyKey) },
+          body: JSON.stringify({
+            event: input.event,
+            form,
+            expectedEventVersion: input.expectedEventVersion,
+            expectedFormVersion: input.expectedFormVersion,
+          }),
         },
       );
     },

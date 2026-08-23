@@ -73,11 +73,20 @@ export class D1CfpRepository implements CfpRepository {
   readonly #db: D1Database;
   readonly #orm: OpenSessionboardDatabase;
   readonly #now: () => string;
+  readonly #token: () => string;
 
-  constructor(db: D1Database, options: { now?: () => string } = {}) {
+  constructor(db: D1Database, options: { now?: () => string; token?: () => string } = {}) {
     this.#db = db;
     this.#orm = createDatabase(db);
     this.#now = options.now ?? nowIso;
+    this.#token =
+      options.token ??
+      (() =>
+        (
+          globalThis as unknown as {
+            crypto: { randomUUID(): string };
+          }
+        ).crypto.randomUUID());
   }
 
   async getEvent(tenantId: string, eventId: string): Promise<EventCfp | null> {
@@ -159,18 +168,58 @@ export class D1CfpRepository implements CfpRepository {
   }
 
   async saveForm(form: CfpForm, expectedVersion: number | null): Promise<void> {
-    const current = await this.getForm(form.tenantId, form.id);
-    if ((current?.version ?? null) !== expectedVersion) throw conflict("The CFP form has changed.");
     const timestamp = this.#now();
-    const statements: D1PreparedStatement[] = [];
-    if (current === null) {
+    const token = this.#token();
+    const guard = (sql: string, values: unknown[]) =>
+      this.#db
+        .prepare(
+          `${sql} AND EXISTS (
+             SELECT 1 FROM cfp_configuration_write_guards
+             WHERE token = ? AND organization_id = ? AND event_id = ? AND form_id = ?
+           )`,
+        )
+        .bind(...values, token, form.tenantId, form.eventId, form.id);
+    const statements: D1PreparedStatement[] = [
+      this.#db
+        .prepare(
+          `INSERT INTO cfp_configuration_write_guards (token, organization_id, event_id, form_id, created_at)
+           SELECT ?, ?, ?, ?, ?
+           WHERE EXISTS (SELECT 1 FROM events WHERE organization_id = ? AND id = ?)
+             AND (
+               (? IS NULL AND NOT EXISTS (
+                 SELECT 1 FROM cfp_forms WHERE organization_id = ? AND id = ?
+               ))
+               OR
+               (? IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM cfp_forms
+                 WHERE organization_id = ? AND id = ? AND event_id = ? AND version = ?
+               ))
+             )`,
+        )
+        .bind(
+          token,
+          form.tenantId,
+          form.eventId,
+          form.id,
+          timestamp,
+          form.tenantId,
+          form.eventId,
+          expectedVersion,
+          form.tenantId,
+          form.id,
+          expectedVersion,
+          form.tenantId,
+          form.id,
+          form.eventId,
+          expectedVersion,
+        ),
+    ];
+    if (expectedVersion === null) {
       statements.push(
-        this.#db
-          .prepare(
-            `INSERT INTO cfp_forms (id, organization_id, event_id, name, status, welcome_content, speaker_limit, max_submissions_per_account, reminders_enabled, admin_notifications_enabled, confirmation_message, success_content, redirect_url, version, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
+        guard(
+          `INSERT INTO cfp_forms (id, organization_id, event_id, name, status, welcome_content, speaker_limit, max_submissions_per_account, reminders_enabled, admin_notifications_enabled, confirmation_message, success_content, redirect_url, version, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+          [
             form.id,
             form.tenantId,
             form.eventId,
@@ -187,16 +236,15 @@ export class D1CfpRepository implements CfpRepository {
             form.version,
             timestamp,
             timestamp,
-          ),
+          ],
+        ),
       );
     } else {
       statements.push(
-        this.#db
-          .prepare(
-            `UPDATE cfp_forms SET name = ?, status = ?, welcome_content = ?, speaker_limit = ?, max_submissions_per_account = ?, reminders_enabled = ?, admin_notifications_enabled = ?, confirmation_message = ?, success_content = ?, redirect_url = ?, version = ?, updated_at = ?
-           WHERE organization_id = ? AND id = ? AND event_id = ? AND version = ?`,
-          )
-          .bind(
+        guard(
+          `UPDATE cfp_forms SET name = ?, status = ?, welcome_content = ?, speaker_limit = ?, max_submissions_per_account = ?, reminders_enabled = ?, admin_notifications_enabled = ?, confirmation_message = ?, success_content = ?, redirect_url = ?, version = ?, updated_at = ?
+           WHERE organization_id = ? AND id = ? AND event_id = ?`,
+          [
             form.name,
             form.status,
             form.welcomeContent,
@@ -212,46 +260,45 @@ export class D1CfpRepository implements CfpRepository {
             form.tenantId,
             form.id,
             form.eventId,
-            expectedVersion,
-          ),
-      );
-      statements.push(
-        this.#db
-          .prepare("DELETE FROM cfp_form_rules WHERE organization_id = ? AND form_id = ?")
-          .bind(form.tenantId, form.id),
-        this.#db
-          .prepare("DELETE FROM cfp_form_fields WHERE organization_id = ? AND form_id = ?")
-          .bind(form.tenantId, form.id),
-        this.#db
-          .prepare("DELETE FROM cfp_form_sections WHERE organization_id = ? AND form_id = ?")
-          .bind(form.tenantId, form.id),
+          ],
+        ),
+        guard("DELETE FROM cfp_form_rules WHERE organization_id = ? AND form_id = ?", [
+          form.tenantId,
+          form.id,
+        ]),
+        guard("DELETE FROM cfp_form_fields WHERE organization_id = ? AND form_id = ?", [
+          form.tenantId,
+          form.id,
+        ]),
+        guard("DELETE FROM cfp_form_sections WHERE organization_id = ? AND form_id = ?", [
+          form.tenantId,
+          form.id,
+        ]),
       );
     }
     for (const [index, section] of form.sections.entries()) {
       statements.push(
-        this.#db
-          .prepare(
-            "INSERT INTO cfp_form_sections (organization_id, form_id, id, title, description, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
-          )
-          .bind(
+        guard(
+          `INSERT INTO cfp_form_sections (organization_id, form_id, id, title, description, sort_order)
+           SELECT ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+          [
             form.tenantId,
             form.id,
             section.id,
             section.title,
             section.description,
             section.order ?? index,
-          ),
+          ],
+        ),
       );
     }
     const addFields = (fields: readonly FormField[], scope: "submission" | "participant") => {
       for (const [index, field] of fields.entries()) {
         statements.push(
-          this.#db
-            .prepare(
-              `INSERT INTO cfp_form_fields (organization_id, form_id, id, section_id, scope, field_key, label, description, placeholder, kind, required, options_json, file_owner, allowed_mime_types_json, max_bytes, reusable_field_id, reusable_field_version, sort_order)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .bind(
+          guard(
+            `INSERT INTO cfp_form_fields (organization_id, form_id, id, section_id, scope, field_key, label, description, placeholder, kind, required, options_json, file_owner, allowed_mime_types_json, max_bytes, reusable_field_id, reusable_field_version, sort_order)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+            [
               form.tenantId,
               form.id,
               field.id,
@@ -270,7 +317,8 @@ export class D1CfpRepository implements CfpRepository {
               field.fieldRef?.id ?? null,
               field.fieldRef?.version ?? null,
               index,
-            ),
+            ],
+          ),
         );
       }
     };
@@ -278,20 +326,21 @@ export class D1CfpRepository implements CfpRepository {
     addFields(form.participantFields, "participant");
     for (const rule of form.rules) {
       statements.push(
-        this.#db
-          .prepare(
-            "INSERT INTO cfp_form_rules (organization_id, form_id, id, priority, condition_json, actions_json) VALUES (?, ?, ?, ?, ?, ?)",
-          )
-          .bind(
-            form.tenantId,
-            form.id,
-            rule.id,
-            rule.priority,
-            json(rule.when),
-            json(rule.actions),
-          ),
+        guard(
+          `INSERT INTO cfp_form_rules (organization_id, form_id, id, priority, condition_json, actions_json)
+           SELECT ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+          [form.tenantId, form.id, rule.id, rule.priority, json(rule.when), json(rule.actions)],
+        ),
       );
     }
+    statements.push(
+      this.#db
+        .prepare(
+          `DELETE FROM cfp_configuration_write_guards
+           WHERE token = ? AND organization_id = ? AND event_id = ? AND form_id = ?`,
+        )
+        .bind(token, form.tenantId, form.eventId, form.id),
+    );
     try {
       const results = await this.#db.batch(statements);
       if ((results[0]?.meta?.changes ?? 0) !== 1) throw conflict("The CFP form has changed.");
@@ -301,6 +350,213 @@ export class D1CfpRepository implements CfpRepository {
     }
   }
 
+  async saveConfiguration(
+    event: EventCfp,
+    form: CfpForm,
+    expectedEventVersion: number | null,
+    expectedFormVersion: number | null,
+  ): Promise<void> {
+    const timestamp = this.#now();
+    const token = this.#token();
+    const guard = (sql: string, values: unknown[]) =>
+      this.#db
+        .prepare(
+          `${sql} AND EXISTS (
+             SELECT 1 FROM cfp_configuration_write_guards
+             WHERE token = ? AND organization_id = ? AND event_id = ? AND form_id = ?
+           )`,
+        )
+        .bind(...values, token, event.tenantId, event.id, form.id);
+    const statements: D1PreparedStatement[] = [
+      this.#db
+        .prepare(
+          `INSERT INTO cfp_configuration_write_guards (token, organization_id, event_id, form_id, created_at)
+           SELECT ?, ?, ?, ?, ?
+           WHERE ? = ? AND ? = ?
+             AND EXISTS (
+               SELECT 1 FROM events
+               WHERE organization_id = ? AND id = ? AND version = ?
+                 AND julianday(?) <= julianday(starts_at)
+                 AND julianday(?) <= julianday(starts_at)
+             )
+             AND (
+               (? IS NULL AND NOT EXISTS (
+                 SELECT 1 FROM cfp_forms WHERE organization_id = ? AND id = ?
+               ))
+               OR
+               (? IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM cfp_forms
+                 WHERE organization_id = ? AND id = ? AND event_id = ? AND version = ?
+               ))
+             )`,
+        )
+        .bind(
+          token,
+          event.tenantId,
+          event.id,
+          form.id,
+          timestamp,
+          form.tenantId,
+          event.tenantId,
+          form.eventId,
+          event.id,
+          event.tenantId,
+          event.id,
+          expectedEventVersion,
+          event.opensAt,
+          event.closesAt,
+          expectedFormVersion,
+          form.tenantId,
+          form.id,
+          expectedFormVersion,
+          form.tenantId,
+          form.id,
+          form.eventId,
+          expectedFormVersion,
+        ),
+    ];
+    if (expectedFormVersion === null) {
+      statements.push(
+        guard(
+          `INSERT INTO cfp_forms (id, organization_id, event_id, name, status, welcome_content, speaker_limit, max_submissions_per_account, reminders_enabled, admin_notifications_enabled, confirmation_message, success_content, redirect_url, version, created_at, updated_at)
+           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+          [
+            form.id,
+            form.tenantId,
+            form.eventId,
+            form.name,
+            form.status,
+            form.welcomeContent,
+            form.settings.speakerLimit,
+            form.settings.maxSubmissionsPerAccount,
+            form.settings.remindersEnabled ? 1 : 0,
+            form.settings.adminNotificationsEnabled ? 1 : 0,
+            form.settings.confirmationMessage,
+            form.settings.successContent,
+            form.settings.redirectUrl ?? null,
+            form.version,
+            timestamp,
+            timestamp,
+          ],
+        ),
+      );
+    } else {
+      statements.push(
+        guard(
+          `UPDATE cfp_forms SET name = ?, status = ?, welcome_content = ?, speaker_limit = ?, max_submissions_per_account = ?, reminders_enabled = ?, admin_notifications_enabled = ?, confirmation_message = ?, success_content = ?, redirect_url = ?, version = ?, updated_at = ?
+           WHERE organization_id = ? AND id = ? AND event_id = ?`,
+          [
+            form.name,
+            form.status,
+            form.welcomeContent,
+            form.settings.speakerLimit,
+            form.settings.maxSubmissionsPerAccount,
+            form.settings.remindersEnabled ? 1 : 0,
+            form.settings.adminNotificationsEnabled ? 1 : 0,
+            form.settings.confirmationMessage,
+            form.settings.successContent,
+            form.settings.redirectUrl ?? null,
+            form.version,
+            timestamp,
+            form.tenantId,
+            form.id,
+            form.eventId,
+          ],
+        ),
+        guard("DELETE FROM cfp_form_rules WHERE organization_id = ? AND form_id = ?", [
+          form.tenantId,
+          form.id,
+        ]),
+        guard("DELETE FROM cfp_form_fields WHERE organization_id = ? AND form_id = ?", [
+          form.tenantId,
+          form.id,
+        ]),
+        guard("DELETE FROM cfp_form_sections WHERE organization_id = ? AND form_id = ?", [
+          form.tenantId,
+          form.id,
+        ]),
+      );
+    }
+    for (const [index, section] of form.sections.entries()) {
+      statements.push(
+        guard(
+          `INSERT INTO cfp_form_sections (organization_id, form_id, id, title, description, sort_order)
+           SELECT ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+          [
+            form.tenantId,
+            form.id,
+            section.id,
+            section.title,
+            section.description,
+            section.order ?? index,
+          ],
+        ),
+      );
+    }
+    const addFields = (fields: readonly FormField[], scope: "submission" | "participant") => {
+      for (const [index, field] of fields.entries()) {
+        statements.push(
+          guard(
+            `INSERT INTO cfp_form_fields (organization_id, form_id, id, section_id, scope, field_key, label, description, placeholder, kind, required, options_json, file_owner, allowed_mime_types_json, max_bytes, reusable_field_id, reusable_field_version, sort_order)
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+            [
+              form.tenantId,
+              form.id,
+              field.id,
+              field.sectionId,
+              scope,
+              field.key,
+              field.label,
+              field.description ?? null,
+              field.placeholder ?? null,
+              field.kind,
+              field.required ? 1 : 0,
+              json(field.options),
+              field.fileRequest?.owner ?? null,
+              field.fileRequest === undefined ? null : json(field.fileRequest.allowedMimeTypes),
+              field.fileRequest?.maxBytes ?? null,
+              field.fieldRef?.id ?? null,
+              field.fieldRef?.version ?? null,
+              index,
+            ],
+          ),
+        );
+      }
+    };
+    addFields(form.submissionFields, "submission");
+    addFields(form.participantFields, "participant");
+    for (const rule of form.rules) {
+      statements.push(
+        guard(
+          `INSERT INTO cfp_form_rules (organization_id, form_id, id, priority, condition_json, actions_json)
+           SELECT ?, ?, ?, ?, ?, ? WHERE 1 = 1`,
+          [form.tenantId, form.id, rule.id, rule.priority, json(rule.when), json(rule.actions)],
+        ),
+      );
+    }
+    statements.push(
+      guard(
+        `UPDATE events SET cfp_enabled = 1, cfp_opens_at = ?, cfp_closes_at = ?, version = ?, updated_at = ?
+         WHERE organization_id = ? AND id = ?`,
+        [event.opensAt, event.closesAt, event.version, timestamp, event.tenantId, event.id],
+      ),
+      this.#db
+        .prepare(
+          `DELETE FROM cfp_configuration_write_guards
+           WHERE token = ? AND organization_id = ? AND event_id = ? AND form_id = ?`,
+        )
+        .bind(token, event.tenantId, event.id, form.id),
+    );
+    try {
+      const results = await this.#db.batch(statements);
+      if ((results[0]?.meta?.changes ?? 0) !== 1) {
+        throw conflict("The event CFP configuration has changed.");
+      }
+    } catch (error) {
+      if (error instanceof CfpError) throw error;
+      throw conflict("The event CFP configuration has changed.");
+    }
+  }
   async getReusableField(
     tenantId: string,
     fieldId: string,

@@ -56,6 +56,16 @@ export interface CfpRepository {
   listForms(tenantId: string, eventId: string): Promise<CfpForm[]>;
   saveForm(form: CfpForm, expectedVersion: number | null): Promise<void>;
   /**
+   * Atomically persists organizer configuration. Production repositories must
+   * implement this; the service fallback is only for non-D1 test adapters.
+   */
+  saveConfiguration?(
+    event: EventCfp,
+    form: CfpForm,
+    expectedEventVersion: number | null,
+    expectedFormVersion: number | null,
+  ): Promise<void>;
+  /**
    * Reusable fields are immutable tenant-owned definitions. The resolver must
    * never return a definition from another tenant or a different version.
    */
@@ -1154,6 +1164,119 @@ export class CfpService {
     return event;
   }
 
+  async saveConfiguration(input: {
+    event: unknown;
+    form: unknown;
+    expectedEventVersion: number | null;
+    expectedFormVersion: number | null;
+    idempotencyKey: string;
+  }): Promise<{ event: EventCfp; form: CfpForm }> {
+    const key = requireIdempotencyKey(input.idempotencyKey);
+    const parsedEvent = eventCfpSchema.safeParse(input.event);
+    if (!parsedEvent.success) {
+      throw new CfpError("VALIDATION_FAILED", "The event CFP configuration is invalid.", {
+        issues: parsedEvent.error.issues,
+      });
+    }
+    const prevalidated = cfpFormSchema.safeParse(input.form);
+    const candidate = prevalidated.success
+      ? normalizeCanonicalTitleFields(prevalidated.data)
+      : input.form;
+    const validation = validateCfpForm(candidate);
+    if (!validation.success) {
+      throw new CfpError("VALIDATION_FAILED", "The CFP form configuration is invalid.", {
+        issues: validation.issues,
+      });
+    }
+    const form = sanitizeDynamicForm(sanitizeForm(validation.form));
+    const sanitizedValidation = validateCfpForm(form);
+    if (!sanitizedValidation.success) {
+      throw new CfpError("VALIDATION_FAILED", "Sanitized CFP form configuration is invalid.", {
+        issues: sanitizedValidation.issues,
+      });
+    }
+    return this.#idempotency.run(
+      `${parsedEvent.data.tenantId}:cfp:configuration`,
+      key,
+      async () => {
+        const currentEvent = await this.#repository.getEvent(
+          parsedEvent.data.tenantId,
+          parsedEvent.data.id,
+        );
+        if (currentEvent === null) throw new CfpError("NOT_FOUND", "The event was not found.");
+        const event = {
+          ...parsedEvent.data,
+          slug: currentEvent.slug,
+          name: currentEvent.name,
+          timezone: currentEvent.timezone,
+          eventStartsAt: currentEvent.eventStartsAt,
+        };
+        ensureEventFormMatch(currentEvent, form);
+        if (currentEvent.eventStartsAt === undefined) {
+          throw new CfpError(
+            "VALIDATION_FAILED",
+            "The authoritative event start is unavailable for CFP schedule validation.",
+          );
+        }
+        const today = localDateInTimeZone(this.#clock.now().toISOString(), event.timezone);
+        const changedPastBoundary =
+          (event.opensAt !== currentEvent.opensAt &&
+            localDateInTimeZone(event.opensAt, event.timezone) < today) ||
+          (event.closesAt !== currentEvent.closesAt &&
+            localDateInTimeZone(event.closesAt, event.timezone) < today);
+        if (changedPastBoundary) {
+          throw new CfpError(
+            "VALIDATION_FAILED",
+            "New CFP dates cannot be before today in the event time zone.",
+          );
+        }
+        if (
+          Date.parse(event.opensAt) > Date.parse(currentEvent.eventStartsAt) ||
+          Date.parse(event.closesAt) > Date.parse(currentEvent.eventStartsAt)
+        ) {
+          throw new CfpError(
+            "VALIDATION_FAILED",
+            "The CFP window must finish before the event begins.",
+          );
+        }
+        const existing = await this.#repository.getForm(form.tenantId, form.id);
+        if (existing) {
+          ensureEventFormMatch(currentEvent, existing);
+          if (
+            input.expectedFormVersion !== existing.version ||
+            form.version !== existing.version + 1
+          ) {
+            throw new CfpError("CONFLICT", "The CFP form has changed since it was loaded.");
+          }
+        } else if (input.expectedFormVersion !== null || form.version !== 1) {
+          throw new CfpError("CONFLICT", "A new CFP form must start at version 1.");
+        }
+        if (
+          input.expectedEventVersion !== currentEvent.version ||
+          event.version !== currentEvent.version + 1
+        ) {
+          throw new CfpError("CONFLICT", "The event CFP configuration has changed.");
+        }
+        await this.#validateReusableFields(form);
+        const forms = await this.#repository.listForms(form.tenantId, form.eventId);
+        if (!forms.some((candidate) => candidate.id === form.id) && forms.length >= 20) {
+          throw new CfpError("FORM_LIMIT_REACHED", "An event cannot have more than 20 CFP forms.");
+        }
+        if (this.#repository.saveConfiguration) {
+          await this.#repository.saveConfiguration(
+            event,
+            form,
+            input.expectedEventVersion,
+            input.expectedFormVersion,
+          );
+        } else {
+          await this.#repository.saveEvent(event, input.expectedEventVersion);
+          await this.#repository.saveForm(form, input.expectedFormVersion);
+        }
+        return { event, form };
+      },
+    );
+  }
   async saveForm(input: unknown, expectedVersion: number | null): Promise<CfpForm> {
     // Repair unambiguous mis-keyed title fields before validation so organizers
     // can save a previously broken form without a dead-end applicant flow.
