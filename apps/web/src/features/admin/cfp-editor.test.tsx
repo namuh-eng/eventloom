@@ -1131,6 +1131,252 @@ describe("CFP editor", () => {
       unsupportedRule,
     ]);
   });
+  it("keeps syntactic but editor-incompatible rules unowned and unchanged", () => {
+    const current = createTestCfpConfiguration("devflow-conf-2027");
+    const event = {
+      id: "devflow-conf-2027",
+      tenantId: "ai-engineer",
+      version: 1,
+      slug: "devflow-conf-2027",
+      name: current.eventName,
+      timezone: current.timezone,
+      opensAt: "2027-01-01T00:00:00.000Z",
+      closesAt: "2027-02-01T00:00:00.000Z",
+    };
+    const baseForm = toFormConfiguration(current, "ai-engineer", "devflow-conf-2027");
+    const candidates = [
+      {
+        id: "text-source",
+        priority: 1,
+        when: {
+          type: "group",
+          operator: "all",
+          conditions: [
+            { type: "predicate", fieldKey: "title", operator: "equals", value: "Workshop" },
+          ],
+        },
+        actions: [{ type: "show_field", fieldKey: "accessibility-notes" }],
+      },
+      {
+        id: "stale-option",
+        priority: 2,
+        when: {
+          type: "group",
+          operator: "all",
+          conditions: [
+            {
+              type: "predicate",
+              fieldKey: "format",
+              operator: "equals",
+              value: "Retired format",
+            },
+          ],
+        },
+        actions: [{ type: "show_field", fieldKey: "accessibility-notes" }],
+      },
+      {
+        id: "self-target",
+        priority: 3,
+        when: {
+          type: "group",
+          operator: "all",
+          conditions: [
+            {
+              type: "predicate",
+              fieldKey: "format",
+              operator: "equals",
+              value: "Workshop · 60 minutes",
+            },
+          ],
+        },
+        actions: [{ type: "show_field", fieldKey: "format" }],
+      },
+    ];
+
+    for (const candidate of candidates) {
+      const restored = configurationFromServer(
+        createEmptyCfpConfiguration("devflow-conf-2027"),
+        event,
+        { ...baseForm, rules: [candidate] },
+      );
+      expect(restored.editorRuleId).toBeUndefined();
+      expect(toFormConfiguration(restored, "ai-engineer", "devflow-conf-2027").rules).toEqual([
+        candidate,
+      ]);
+    }
+  });
+
+  it("allocates a fresh editor rule id when an unowned rule uses the reserved id", () => {
+    const current = createTestCfpConfiguration("devflow-conf-2027");
+    const event = {
+      id: "devflow-conf-2027",
+      tenantId: "ai-engineer",
+      version: 1,
+      slug: "devflow-conf-2027",
+      name: current.eventName,
+      timezone: current.timezone,
+      opensAt: "2027-01-01T00:00:00.000Z",
+      closesAt: "2027-02-01T00:00:00.000Z",
+    };
+    const baseForm = toFormConfiguration(current, "ai-engineer", "devflow-conf-2027");
+    const reservedRule = {
+      id: "editor-conditional-rule",
+      priority: 37,
+      when: {
+        type: "group",
+        operator: "all",
+        conditions: [
+          {
+            type: "predicate",
+            fieldKey: "format",
+            operator: "contains",
+            value: "Workshop",
+          },
+        ],
+      },
+      actions: [{ type: "show_field", fieldKey: "accessibility-notes" }],
+      owner: "external",
+    };
+    const restored = configurationFromServer(
+      createEmptyCfpConfiguration("devflow-conf-2027"),
+      event,
+      { ...baseForm, rules: [reservedRule] },
+    );
+    restored.rule = {
+      type: "condition",
+      field: "format",
+      operator: "is",
+      value: "Workshop · 60 minutes",
+    };
+    restored.ruleTargetField = "accessibility-notes";
+
+    const rules = toFormConfiguration(restored, "ai-engineer", "devflow-conf-2027").rules;
+    expect(rules).toContainEqual(reservedRule);
+    expect(rules).toContainEqual(
+      expect.objectContaining({
+        id: "editor-conditional-rule-2",
+        priority: 100,
+        actions: [{ type: "show_field", fieldKey: "accessibility-notes" }],
+      }),
+    );
+  });
+  it("refuses ownership when duplicate persisted ids make rule identity ambiguous", () => {
+    const current = createTestCfpConfiguration("devflow-conf-2027");
+    const event = {
+      id: "devflow-conf-2027",
+      tenantId: "ai-engineer",
+      version: 1,
+      slug: "devflow-conf-2027",
+      name: current.eventName,
+      timezone: current.timezone,
+      opensAt: "2027-01-01T00:00:00.000Z",
+      closesAt: "2027-02-01T00:00:00.000Z",
+    };
+    const baseForm = toFormConfiguration(current, "ai-engineer", "devflow-conf-2027");
+    const managed = baseForm.rules[0];
+    if (managed === undefined) throw new Error("Expected the managed rule fixture.");
+    const unsupportedSibling = {
+      id: managed.id,
+      priority: 200,
+      when: {
+        type: "group",
+        operator: "all",
+        conditions: [
+          {
+            type: "predicate",
+            fieldKey: "format",
+            operator: "contains",
+            value: "Workshop",
+          },
+        ],
+      },
+      actions: [{ type: "show_field", fieldKey: "accessibility-notes" }],
+    };
+    const persistedRules = [managed, unsupportedSibling];
+    const restored = configurationFromServer(
+      createEmptyCfpConfiguration("devflow-conf-2027"),
+      event,
+      { ...baseForm, rules: persistedRules },
+    );
+
+    expect(restored.editorRuleId).toBeUndefined();
+    expect(toFormConfiguration(restored, "ai-engineer", "devflow-conf-2027").rules).toEqual(
+      persistedRules,
+    );
+  });
+
+  it("uses normalized taxonomy options before claiming rule ownership", () => {
+    const current = createTestCfpConfiguration("devflow-conf-2027");
+    const event = {
+      id: "devflow-conf-2027",
+      tenantId: "ai-engineer",
+      version: 1,
+      slug: "devflow-conf-2027",
+      name: current.eventName,
+      timezone: current.timezone,
+      opensAt: "2027-01-01T00:00:00.000Z",
+      closesAt: "2027-02-01T00:00:00.000Z",
+    };
+    const baseForm = toFormConfiguration(current, "ai-engineer", "devflow-conf-2027");
+    const objectOptionForm = {
+      ...baseForm,
+      submissionFields: baseForm.submissionFields.map((field) =>
+        field.key === "format"
+          ? {
+              ...field,
+              options: [
+                { label: "Workshop · 60 minutes", value: "Workshop · 60 minutes" },
+              ] as unknown as string[],
+            }
+          : field,
+      ),
+    };
+    const restored = configurationFromServer(
+      createEmptyCfpConfiguration("devflow-conf-2027"),
+      event,
+      objectOptionForm,
+    );
+
+    expect(restored.formats).toEqual([]);
+    expect(restored.editorRuleId).toBeUndefined();
+    expect(toFormConfiguration(restored, "ai-engineer", "devflow-conf-2027").rules).toEqual(
+      baseForm.rules,
+    );
+  });
+  it("gives established rule ownership precedence independent of persisted order", () => {
+    const current = createTestCfpConfiguration("devflow-conf-2027");
+    current.editorRuleId = "rule-workshop-prerequisites";
+    const event = {
+      id: "devflow-conf-2027",
+      tenantId: "ai-engineer",
+      version: 1,
+      slug: "devflow-conf-2027",
+      name: current.eventName,
+      timezone: current.timezone,
+      opensAt: "2027-01-01T00:00:00.000Z",
+      closesAt: "2027-02-01T00:00:00.000Z",
+    };
+    const baseForm = toFormConfiguration(current, "ai-engineer", "devflow-conf-2027");
+    const established = baseForm.rules[0];
+    if (established === undefined) throw new Error("Expected the established rule fixture.");
+    const reservedExternal = {
+      ...established,
+      id: "editor-conditional-rule",
+      priority: 55,
+      owner: "external",
+    };
+
+    for (const rules of [
+      [reservedExternal, established],
+      [established, reservedExternal],
+    ]) {
+      const restored = configurationFromServer(current, event, { ...baseForm, rules });
+      expect(restored.editorRuleId).toBe("rule-workshop-prerequisites");
+      expect(
+        toFormConfiguration(restored, "ai-engineer", "devflow-conf-2027").rules,
+      ).toContainEqual(reservedExternal);
+    }
+  });
 
   it("omits empty optional taxonomy fields from persisted forms", () => {
     const configuration = createTestCfpConfiguration("devflow-conf-2027");

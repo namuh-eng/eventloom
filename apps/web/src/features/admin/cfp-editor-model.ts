@@ -753,6 +753,18 @@ function serverRuleCondition(rule: CfpRule, fields: CfpFormField[]): Record<stri
   };
 }
 
+function managedEditorRuleId(configuration: CfpConfiguration): string {
+  if (configuration.editorRuleId) return configuration.editorRuleId;
+  const existingIds = new Set(
+    (configuration.rules ?? []).flatMap((rule) => (typeof rule.id === "string" ? [rule.id] : [])),
+  );
+  const base = "editor-conditional-rule";
+  if (!existingIds.has(base)) return base;
+  let suffix = 2;
+  while (existingIds.has(`${base}-${suffix}`)) suffix += 1;
+  return `${base}-${suffix}`;
+}
+
 function editorConditionalRule(
   configuration: CfpConfiguration,
   fields: CfpFormField[],
@@ -764,13 +776,15 @@ function editorConditionalRule(
     (field) => field.key === targetField || field.id === targetField || field.label === targetField,
   );
   if (!target?.key) return null;
-  const existingRule = configuration.rules?.find(
-    (rule) => rule.id === (configuration.editorRuleId ?? "editor-conditional-rule"),
-  );
+  const ruleId = managedEditorRuleId(configuration);
+  const existingRule =
+    configuration.editorRuleId === undefined
+      ? undefined
+      : configuration.rules?.find((rule) => rule.id === configuration.editorRuleId);
   const serverRule = serverRuleCondition(configuration.rule, fields);
   return {
     ...existingRule,
-    id: configuration.editorRuleId ?? "editor-conditional-rule",
+    id: ruleId,
     priority:
       existingRule !== undefined && typeof existingRule.priority === "number"
         ? existingRule.priority
@@ -1158,10 +1172,26 @@ export async function persistCfpConfiguration(
 function emptyEditorRule(): CfpCondition {
   return { type: "condition", field: "", operator: "is", value: "" };
 }
+function editorRuleRepresentable(
+  condition: CfpRule,
+  target: string,
+  fields: CfpFormField[],
+): boolean {
+  const targetField = fields.find((field) => field.key === target);
+  if (targetField === undefined) return false;
+  return ruleConditions(condition).every((predicate) => {
+    const source = fields.find((field) => field.key === predicate.field);
+    return (
+      source !== undefined &&
+      source.key !== targetField.key &&
+      fieldOptionValues(source).includes(predicate.value)
+    );
+  });
+}
 
 function canonicalEditorRule(
   rule: Record<string, unknown>,
-  submissionFields: CfpFormConfiguration["submissionFields"],
+  fields: CfpFormField[],
 ): { id: string; condition: CfpRule; target: string } | null {
   if (typeof rule.id !== "string" || !Array.isArray(rule.actions) || rule.actions.length !== 1) {
     return null;
@@ -1174,30 +1204,35 @@ function canonicalEditorRule(
     !hasExactKeys(action as Record<string, unknown>, ["type", "fieldKey"]) ||
     action.type !== "show_field" ||
     typeof action.fieldKey !== "string" ||
-    !submissionFields.some((field) => field.key === action.fieldKey)
+    !fields.some((field) => field.key === action.fieldKey)
   ) {
     return null;
   }
   if (!("when" in rule)) return null;
   const condition = editorRuleCondition(rule.when);
-  return condition === null ? null : { id: rule.id, condition, target: action.fieldKey };
+  return condition === null || !editorRuleRepresentable(condition, action.fieldKey, fields)
+    ? null
+    : { id: rule.id, condition, target: action.fieldKey };
 }
 
 function recognizedEditorRule(
   form: CfpFormConfiguration,
   current: CfpConfiguration,
 ): { id: string; condition: CfpRule; target: string } | null {
+  const idCounts = new Map<string, number>();
+  for (const rule of form.rules) {
+    if (typeof rule.id === "string") idCounts.set(rule.id, (idCounts.get(rule.id) ?? 0) + 1);
+  }
+  const fields = cfpRuleFields(current);
   const canonicalRules = form.rules.flatMap((rule) => {
-    const candidate = canonicalEditorRule(rule, form.submissionFields);
-    return candidate === null ? [] : [candidate];
+    const candidate = canonicalEditorRule(rule, fields);
+    return candidate === null || idCounts.get(candidate.id) !== 1 ? [] : [candidate];
   });
-  const knownIds = new Set(
-    ["editor-conditional-rule", current.editorRuleId].filter(
-      (id): id is string => typeof id === "string",
-    ),
-  );
-  const known = canonicalRules.find((rule) => knownIds.has(rule.id));
-  if (known !== undefined) return known;
+  if (current.editorRuleId !== undefined) {
+    return canonicalRules.find((rule) => rule.id === current.editorRuleId) ?? null;
+  }
+  const defaultRule = canonicalRules.find((rule) => rule.id === "editor-conditional-rule");
+  if (defaultRule !== undefined) return defaultRule;
   return canonicalRules.length === 1 ? (canonicalRules[0] ?? null) : null;
 }
 export function configurationFromServer(
@@ -1234,7 +1269,21 @@ export function configurationFromServer(
     }
     return options.length > 0 ? options : fallback;
   };
-  const editorRule = recognizedEditorRule(form, current);
+  const tracks = optionsFor("track", current.tracks);
+  const tags = optionsFor("tags", current.tags);
+  const formats = optionsFor("format", current.formats);
+  const levels = optionsFor("level", current.levels);
+  const fields = withCoreProposalFields(form.submissionFields.map(toEditorField));
+  const participantFields = form.participantFields.map(toEditorField);
+  const editorRule = recognizedEditorRule(form, {
+    ...current,
+    tracks,
+    tags,
+    formats,
+    levels,
+    fields,
+    participantFields,
+  });
   const persistedRuleTarget = editorRule?.target;
   const persistedEditorCondition = editorRule?.condition;
   const persistedRuleTargetLabel =
@@ -1258,10 +1307,10 @@ export function configurationFromServer(
     persistedClosesAt: event.closesAt,
     participantLimit: readNumber("speakerLimit", current.participantLimit),
     proposalLimit: readNumber("maxSubmissionsPerAccount", current.proposalLimit),
-    tracks: optionsFor("track", current.tracks),
-    tags: optionsFor("tags", current.tags),
-    formats: optionsFor("format", current.formats),
-    levels: optionsFor("level", current.levels),
+    tracks,
+    tags,
+    formats,
+    levels,
     reminderEmails: readBoolean("remindersEnabled", current.reminderEmails),
     adminNotifications: readBoolean("adminNotificationsEnabled", current.adminNotifications),
     welcomeTitle,
@@ -1274,8 +1323,8 @@ export function configurationFromServer(
       .join("\n"),
     successMessage: readString("successContent", current.successMessage),
     redirectUrl: readString("redirectUrl", current.redirectUrl),
-    fields: withCoreProposalFields(form.submissionFields.map(toEditorField)),
-    participantFields: form.participantFields.map(toEditorField),
+    fields,
+    participantFields,
     sections: form.sections.map((section) => ({ ...section })),
     rules: [...form.rules],
     editorRuleId: editorRule?.id,
