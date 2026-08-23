@@ -12,7 +12,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { type CfpEventConfiguration, type CfpFormConfiguration, createCfpApi } from "../cfp/api";
+import {
+  CfpApiError,
+  type CfpEventConfiguration,
+  type CfpFormConfiguration,
+  createCfpApi,
+} from "../cfp/api";
 import { createEventSettingsApi } from "../settings/api";
 import { getCfpStepRoute } from "../cfp/routes";
 import styles from "./cfp-editor.module.css";
@@ -58,6 +63,26 @@ export { CfpEventIdentityFields, CfpPastCloseConfirmation };
 type CfpSectionId = (typeof SECTION_LINKS)[number]["id"];
 type CfpSaveState = "idle" | "saving" | "saved" | "error";
 type CfpTaxonomyKey = "formats" | "levels" | "tags" | "tracks";
+
+function cfpEditorErrorMessage(error: unknown): string {
+  if (!(error instanceof CfpApiError) || !Array.isArray(error.details)) {
+    return error instanceof Error ? error.message : "The CFP configuration could not be saved.";
+  }
+  const firstIssue = error.details.find(
+    (issue): issue is { path?: unknown; message: string } =>
+      typeof issue === "object" &&
+      issue !== null &&
+      "message" in issue &&
+      typeof issue.message === "string",
+  );
+  if (firstIssue === undefined) return error.message;
+  const path = Array.isArray(firstIssue.path)
+    ? firstIssue.path
+        .filter((segment) => typeof segment === "string" || typeof segment === "number")
+        .join(".")
+    : "";
+  return `${error.message} ${path ? `${path}: ` : ""}${firstIssue.message}`;
+}
 type CfpCanonicalTaxonomy = Readonly<Record<CfpTaxonomyKey, readonly string[]>>;
 type CfpPreviewSelectionKey = "format" | "track" | "level";
 
@@ -523,9 +548,7 @@ function useCfpEditorController({
       return saved;
     } catch (error) {
       setSaveState("error");
-      setSaveError(
-        error instanceof Error ? error.message : "The CFP configuration could not be saved.",
-      );
+      setSaveError(cfpEditorErrorMessage(error));
       return null;
     } finally {
       saveInFlightRef.current = false;
