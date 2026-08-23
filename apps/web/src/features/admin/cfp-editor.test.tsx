@@ -45,6 +45,14 @@ describe("CFP editor", () => {
     expect(configuration.ruleTargetField).toBeUndefined();
     expect(toFormConfiguration(configuration, "organization-1", "summit-2026").rules).toEqual([]);
   });
+  it("uses the event name when optional CFP welcome copy is blank", () => {
+    const configuration = createEmptyCfpConfiguration("summit-2026");
+    configuration.eventName = "Eventloom Summit 2026";
+
+    expect(toFormConfiguration(configuration, "organization-1", "summit-2026").name).toBe(
+      "Eventloom Summit 2026",
+    );
+  });
 
   it("resolves all taxonomy rule fields with authoritative options", () => {
     const configuration = createTestCfpConfiguration("devflow-conf-2027");
