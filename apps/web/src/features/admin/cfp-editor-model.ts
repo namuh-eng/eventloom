@@ -1082,7 +1082,8 @@ export function toFormConfiguration(
     id: configuration.id ?? `${eventId}-cfp`,
     tenantId: organizationId,
     eventId,
-    name: configuration.welcomeTitle,
+    name:
+      configuration.welcomeTitle.trim() || configuration.eventName.trim() || "Call for proposals",
     version: configuration.formVersion ?? 1,
     status: configuration.status ?? "draft",
     welcomeContent: `${configuration.welcomeTitle}\n${configuration.welcomeBody}`,
