@@ -78,6 +78,15 @@ class FakeCfpService implements CfpRouteService {
     this.#record("saveForm", { input, expectedVersion });
     return structuredClone(input as CfpForm);
   }
+  async saveConfiguration(
+    input: Parameters<CfpService["saveConfiguration"]>[0],
+  ): Promise<Awaited<ReturnType<CfpService["saveConfiguration"]>>> {
+    this.#record("saveConfiguration", input);
+    return {
+      event: structuredClone(input.event as EventCfp),
+      form: structuredClone(input.form as CfpForm),
+    };
+  }
 
   async publishForm(
     input: Parameters<CfpService["publishForm"]>[0],
@@ -264,6 +273,60 @@ describe("CFP API routes", () => {
     expect(formResponse.status).toBe(200);
     await expect(formResponse.json()).resolves.toMatchObject({ data: { id: "form_1" } });
     expect(service.calls.map((call) => call.method)).toEqual(["saveEvent", "saveForm"]);
+  });
+  it("saves aggregate configuration through the single conditional endpoint", async () => {
+    const { app, service } = createFixture();
+    const response = await app.request(
+      `${basePath}/configuration`,
+      {
+        method: "PUT",
+        headers: requestHeaders("organizer", "configuration-save"),
+        body: JSON.stringify({
+          event: { ...event, version: 2 },
+          form: { ...form, version: 2 },
+          expectedEventVersion: 1,
+          expectedFormVersion: 1,
+        }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      data: { event: { version: 2 }, form: { version: 2 } },
+    });
+    expect(service.calls).toEqual([
+      {
+        method: "saveConfiguration",
+        input: {
+          event: { ...event, version: 2 },
+          form: { ...form, version: 2 },
+          expectedEventVersion: 1,
+          expectedFormVersion: 1,
+          idempotencyKey: "configuration-save",
+        },
+      },
+    ]);
+  });
+
+  it("rejects incomplete aggregate configuration before calling the service", async () => {
+    const { app, service } = createFixture();
+    const response = await app.request(
+      `${basePath}/configuration`,
+      {
+        method: "PUT",
+        headers: requestHeaders("organizer", "configuration-invalid"),
+        body: JSON.stringify({
+          event,
+          form,
+          expectedEventVersion: 1,
+        }),
+      },
+      environment,
+    );
+
+    expect(response.status).toBe(400);
+    expect(service.calls).toEqual([]);
   });
   it("accepts a fully configured form with a URL field before publishing", async () => {
     const { app, service } = createFixture();

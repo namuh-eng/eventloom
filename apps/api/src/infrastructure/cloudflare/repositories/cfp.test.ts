@@ -1,6 +1,6 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EventCfp } from "../../../features/cfp/model";
+import type { CfpForm, EventCfp } from "../../../features/cfp/model";
 import { SqliteD1 } from "../../../test-support/sqlite-d1";
 import { D1CfpRepository, eventCfpFromRow } from "./cfp";
 
@@ -16,6 +16,38 @@ const eventRow = {
   cfpOpensAt: null,
   cfpClosesAt: null,
 };
+const form = (overrides: Partial<CfpForm> = {}): CfpForm => ({
+  id: "form-1",
+  tenantId: "organization-1",
+  eventId: "event-1",
+  name: "Main CFP",
+  version: 1,
+  status: "draft",
+  welcomeContent: "Welcome",
+  settings: {
+    speakerLimit: 3,
+    maxSubmissionsPerAccount: 3,
+    remindersEnabled: true,
+    adminNotificationsEnabled: true,
+    confirmationMessage: "Received",
+    successContent: "Thanks",
+  },
+  sections: [{ id: "proposal", title: "Proposal", description: "", order: 0 }],
+  submissionFields: [
+    {
+      id: "title",
+      sectionId: "proposal",
+      key: "title",
+      label: "Title",
+      kind: "text",
+      required: true,
+      options: [],
+    },
+  ],
+  participantFields: [],
+  rules: [],
+  ...overrides,
+});
 
 const databases: SqliteD1[] = [];
 
@@ -61,10 +93,88 @@ function createDatabase(): SqliteD1 {
         30, 'UTC', NULL, 1, '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z',
         'organizer-1', 'organizer-1'
       );
+      CREATE TABLE cfp_configuration_write_guards (
+        token TEXT PRIMARY KEY NOT NULL,
+        organization_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        form_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE cfp_forms (
+        id TEXT PRIMARY KEY NOT NULL,
+        organization_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        welcome_content TEXT NOT NULL,
+        speaker_limit INTEGER NOT NULL,
+        max_submissions_per_account INTEGER NOT NULL,
+        reminders_enabled INTEGER NOT NULL,
+        admin_notifications_enabled INTEGER NOT NULL,
+        confirmation_message TEXT NOT NULL,
+        success_content TEXT NOT NULL,
+        redirect_url TEXT,
+        version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (organization_id, id),
+        UNIQUE (organization_id, event_id, id)
+      ) STRICT;
+      CREATE TABLE cfp_form_sections (
+        organization_id TEXT NOT NULL,
+        form_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        PRIMARY KEY (organization_id, form_id, id)
+      ) STRICT;
+      CREATE TABLE cfp_form_fields (
+        organization_id TEXT NOT NULL,
+        form_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        section_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        field_key TEXT NOT NULL,
+        label TEXT NOT NULL,
+        description TEXT,
+        placeholder TEXT,
+        kind TEXT NOT NULL,
+        required INTEGER NOT NULL,
+        options_json TEXT NOT NULL,
+        file_owner TEXT,
+        allowed_mime_types_json TEXT,
+        max_bytes INTEGER,
+        reusable_field_id TEXT,
+        reusable_field_version INTEGER,
+        sort_order INTEGER NOT NULL,
+        PRIMARY KEY (organization_id, form_id, id)
+      ) STRICT;
+      CREATE TABLE cfp_form_rules (
+        organization_id TEXT NOT NULL,
+        form_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        priority INTEGER NOT NULL,
+        condition_json TEXT NOT NULL,
+        actions_json TEXT NOT NULL,
+        PRIMARY KEY (organization_id, form_id, id)
+      ) STRICT;
     `,
   );
   databases.push(database);
   return database;
+}
+
+function rawConfigurationState(database: SqliteD1) {
+  return {
+    event: database.query("SELECT * FROM events ORDER BY organization_id, id"),
+    forms: database.query("SELECT * FROM cfp_forms ORDER BY organization_id, id"),
+    sections: database.query(
+      "SELECT * FROM cfp_form_sections ORDER BY organization_id, form_id, id",
+    ),
+    fields: database.query("SELECT * FROM cfp_form_fields ORDER BY organization_id, form_id, id"),
+    rules: database.query("SELECT * FROM cfp_form_rules ORDER BY organization_id, form_id, id"),
+  };
 }
 
 afterEach(() => {
@@ -212,5 +322,327 @@ describe("D1 CFP authoritative event bounds", () => {
       id: "event-1",
       slug: "future-conf",
     });
+  });
+  it("uses a D1 guard so stale configuration writes leave raw rows unchanged", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database, {
+      now: () => "2026-08-02T00:00:00.000Z",
+    });
+    const event = await repository.getEvent("organization-1", "event-1");
+    if (event === null) throw new Error("Expected the event fixture.");
+
+    await repository.saveConfiguration(
+      {
+        ...event,
+        version: 2,
+        opensAt: "2026-09-01T00:00:00.000Z",
+        closesAt: "2026-10-01T00:00:00.000Z",
+      },
+      form(),
+      1,
+      null,
+    );
+    const before = rawConfigurationState(database);
+
+    await expect(
+      repository.saveConfiguration(
+        {
+          ...event,
+          version: 3,
+          opensAt: "2026-09-02T00:00:00.000Z",
+          closesAt: "2026-10-02T00:00:00.000Z",
+        },
+        form({ version: 2, name: "Stale replacement" }),
+        1,
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(rawConfigurationState(database)).toEqual(before);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+  it("rejects duplicate create without changing the existing aggregate", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database);
+    const event = await repository.getEvent("organization-1", "event-1");
+    if (event === null) throw new Error("Expected the event fixture.");
+    await repository.saveConfiguration({ ...event, version: 2 }, form(), 1, null);
+    const before = rawConfigurationState(database);
+
+    await expect(
+      repository.saveConfiguration(
+        { ...event, version: 3 },
+        form({ name: "Duplicate create" }),
+        2,
+        null,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(rawConfigurationState(database)).toEqual(before);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+
+  it("rejects a stale form whose current version equals the proposed version", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database);
+    const event = await repository.getEvent("organization-1", "event-1");
+    if (event === null) throw new Error("Expected the event fixture.");
+    await repository.saveConfiguration({ ...event, version: 2 }, form(), 1, null);
+    await repository.saveForm(
+      form({
+        version: 2,
+        name: "Winning form",
+        sections: [{ id: "winning", title: "Winning", description: "", order: 0 }],
+        submissionFields: [
+          {
+            id: "winning-title",
+            sectionId: "winning",
+            key: "title",
+            label: "Winning title",
+            kind: "text",
+            required: true,
+            options: [],
+          },
+        ],
+      }),
+      1,
+    );
+    const before = rawConfigurationState(database);
+
+    await expect(
+      repository.saveConfiguration(
+        { ...event, version: 3 },
+        form({ version: 2, name: "Stale form" }),
+        2,
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(rawConfigurationState(database)).toEqual(before);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+
+  it("rejects date-ineligible and cross-scope aggregates without partial writes", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database);
+    const event = await repository.getEvent("organization-1", "event-1");
+    if (event === null) throw new Error("Expected the event fixture.");
+    await repository.saveConfiguration({ ...event, version: 2 }, form(), 1, null);
+    const before = rawConfigurationState(database);
+
+    await expect(
+      repository.saveConfiguration(
+        {
+          ...event,
+          version: 3,
+          opensAt: "2026-12-01T00:00:00.000Z",
+          closesAt: "2026-12-02T00:00:00.000Z",
+        },
+        form({ version: 2 }),
+        2,
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(
+      repository.saveConfiguration(
+        { ...event, version: 3 },
+        form({ tenantId: "other-organization", version: 2 }),
+        2,
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(rawConfigurationState(database)).toEqual(before);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+
+  it("atomically replaces the form graph and advances both versions", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database, {
+      now: () => "2026-08-02T00:00:00.000Z",
+    });
+    const event = await repository.getEvent("organization-1", "event-1");
+    if (event === null) throw new Error("Expected the event fixture.");
+    await repository.saveConfiguration({ ...event, version: 2 }, form(), 1, null);
+
+    await repository.saveConfiguration(
+      {
+        ...event,
+        version: 3,
+        opensAt: "2026-09-02T00:00:00.000Z",
+        closesAt: "2026-10-02T00:00:00.000Z",
+      },
+      form({
+        version: 2,
+        name: "Updated CFP",
+        sections: [{ id: "updated", title: "Updated", description: "", order: 0 }],
+        submissionFields: [
+          {
+            id: "updated-title",
+            sectionId: "updated",
+            key: "title",
+            label: "Updated title",
+            kind: "text",
+            required: true,
+            options: [],
+          },
+        ],
+      }),
+      2,
+      1,
+    );
+
+    expect(database.query<{ version: number }>("SELECT version FROM events")).toEqual([
+      { version: 3 },
+    ]);
+    expect(
+      database.query<{ name: string; version: number }>("SELECT name, version FROM cfp_forms"),
+    ).toEqual([{ name: "Updated CFP", version: 2 }]);
+    expect(database.query<{ id: string }>("SELECT id FROM cfp_form_sections")).toEqual([
+      { id: "updated" },
+    ]);
+    expect(database.query<{ id: string }>("SELECT id FROM cfp_form_fields")).toEqual([
+      { id: "updated-title" },
+    ]);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+  it("rolls back aggregate writes when a child constraint fails after guard acquisition", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database);
+    const event = await repository.getEvent("organization-1", "event-1");
+    if (event === null) throw new Error("Expected the event fixture.");
+    const before = rawConfigurationState(database);
+    const duplicateFields = [
+      {
+        id: "duplicate",
+        sectionId: "proposal",
+        key: "title",
+        label: "Title",
+        kind: "text" as const,
+        required: true,
+        options: [],
+      },
+      {
+        id: "duplicate",
+        sectionId: "proposal",
+        key: "duplicate-title",
+        label: "Duplicate",
+        kind: "text" as const,
+        required: false,
+        options: [],
+      },
+    ];
+
+    await expect(
+      repository.saveConfiguration(
+        { ...event, version: 2 },
+        form({ submissionFields: duplicateFields }),
+        1,
+        null,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(rawConfigurationState(database)).toEqual(before);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+
+  it("rolls back standalone updates when a child constraint fails after guard acquisition", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database);
+    await repository.saveForm(form(), null);
+    const before = rawConfigurationState(database);
+
+    await expect(
+      repository.saveForm(
+        form({
+          version: 2,
+          name: "Must roll back",
+          submissionFields: [
+            {
+              id: "duplicate",
+              sectionId: "proposal",
+              key: "title",
+              label: "Title",
+              kind: "text",
+              required: true,
+              options: [],
+            },
+            {
+              id: "duplicate",
+              sectionId: "proposal",
+              key: "duplicate-title",
+              label: "Duplicate",
+              kind: "text",
+              required: false,
+              options: [],
+            },
+          ],
+        }),
+        1,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(rawConfigurationState(database)).toEqual(before);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+
+  it("guards standalone create, duplicate create, and cross-scope writes", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database);
+    await repository.saveForm(form(), null);
+    const afterCreate = rawConfigurationState(database);
+
+    await expect(repository.saveForm(form({ name: "Duplicate" }), null)).rejects.toMatchObject({
+      code: "CONFLICT",
+    });
+    await expect(
+      repository.saveForm(
+        form({
+          id: "other-form",
+          tenantId: "other-organization",
+          eventId: "event-1",
+        }),
+        null,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(rawConfigurationState(database)).toEqual(afterCreate);
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
+  });
+  it("guards standalone form replacement against a read-to-batch race", async () => {
+    const database = createDatabase();
+    const repository = new D1CfpRepository(database as unknown as D1Database, {
+      now: () => "2026-08-02T00:00:00.000Z",
+    });
+    const event = await repository.getEvent("organization-1", "event-1");
+    if (event === null) throw new Error("Expected the event fixture.");
+    await repository.saveConfiguration(
+      {
+        ...event,
+        version: 2,
+        opensAt: "2026-09-01T00:00:00.000Z",
+        closesAt: "2026-10-01T00:00:00.000Z",
+      },
+      form(),
+      1,
+      null,
+    );
+    const before = database.query<Record<string, unknown>>("SELECT * FROM cfp_forms ORDER BY id");
+    database.beforeNextBatch(() => {
+      database.run(
+        "UPDATE cfp_forms SET version = 2 WHERE organization_id = 'organization-1' AND id = 'form-1'",
+      );
+    });
+
+    await expect(
+      repository.saveForm(form({ version: 2, name: "Lost update" }), 1),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+    });
+
+    expect(database.query("SELECT * FROM cfp_forms ORDER BY id")).toEqual(
+      before.map((row) => ({ ...row, version: 2 })),
+    );
+    expect(database.query("SELECT * FROM cfp_configuration_write_guards")).toEqual([]);
   });
 });

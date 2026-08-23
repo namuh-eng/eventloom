@@ -147,8 +147,8 @@ export interface CfpConfiguration {
   rules?: CfpFormConfiguration["rules"];
   rule: CfpRule;
   ruleAction: string;
-  ruleTargetField?: string;
-  editorRuleId?: string;
+  ruleTargetField?: string | undefined;
+  editorRuleId?: string | undefined;
   id?: string;
   status?: "draft" | "published" | "closed";
   eventVersion?: number;
@@ -410,11 +410,12 @@ export function createEmptyCfpConfiguration(eventId: string): CfpConfiguration {
     fields: withCoreProposalFields([]),
     rule: {
       type: "condition",
-      field: "title",
-      operator: "is not",
+      field: "",
+      operator: "is",
       value: "",
     },
     ruleAction: "",
+    ruleTargetField: undefined,
     id: `${eventId}-cfp`,
     status: "draft",
   };
@@ -756,16 +757,24 @@ function editorConditionalRule(
   configuration: CfpConfiguration,
   fields: CfpFormField[],
 ): Record<string, unknown> | null {
+  if (validateCfpEditorConditionalRule(configuration) !== null) return null;
   const targetField = configuration.ruleTargetField?.trim();
   if (!targetField) return null;
   const target = fields.find(
     (field) => field.key === targetField || field.id === targetField || field.label === targetField,
   );
   if (!target?.key) return null;
+  const existingRule = configuration.rules?.find(
+    (rule) => rule.id === (configuration.editorRuleId ?? "editor-conditional-rule"),
+  );
   const serverRule = serverRuleCondition(configuration.rule, fields);
   return {
+    ...existingRule,
     id: configuration.editorRuleId ?? "editor-conditional-rule",
-    priority: 100,
+    priority:
+      existingRule !== undefined && typeof existingRule.priority === "number"
+        ? existingRule.priority
+        : 100,
     when:
       serverRule.type === "group"
         ? serverRule
@@ -776,6 +785,117 @@ function editorConditionalRule(
           },
     actions: [{ type: "show_field", fieldKey: target.key }],
   };
+}
+export function cfpRuleFields(configuration: CfpConfiguration): CfpFormField[] {
+  const taxonomyFields: CfpFormField[] = [
+    {
+      id: "server-format",
+      key: "format",
+      label: "Format",
+      type: "select",
+      required: false,
+      visible: true,
+      placeholder: "",
+      options: configuration.formats,
+    },
+    {
+      id: "server-tags",
+      key: "tags",
+      label: "Tags",
+      type: "multi_select",
+      required: false,
+      visible: true,
+      placeholder: "",
+      options: configuration.tags,
+    },
+    {
+      id: "server-track",
+      key: "track",
+      label: "Track",
+      type: "select",
+      required: false,
+      visible: true,
+      placeholder: "",
+      options: configuration.tracks,
+    },
+    {
+      id: "server-level",
+      key: "level",
+      label: "Level",
+      type: "select",
+      required: false,
+      visible: true,
+      placeholder: "",
+      options: configuration.levels,
+    },
+    {
+      id: "server-language",
+      key: "language",
+      label: "Language",
+      type: "select",
+      required: false,
+      visible: true,
+      placeholder: "",
+      options: ["English"],
+    },
+  ];
+  return [
+    ...configuration.fields.map((field) => {
+      const taxonomyField = taxonomyFields.find(
+        (candidate) => fieldStorageKey(candidate) === fieldStorageKey(field),
+      );
+      return taxonomyField === undefined
+        ? field
+        : { ...field, options: taxonomyField.options ?? [] };
+    }),
+    ...taxonomyFields.filter(
+      (taxonomyField) =>
+        !configuration.fields.some(
+          (field) => fieldStorageKey(field) === fieldStorageKey(taxonomyField),
+        ),
+    ),
+  ];
+}
+
+function ruleConditions(rule: CfpRule): CfpCondition[] {
+  return rule.type === "condition" ? [rule] : rule.conditions.flatMap(ruleConditions);
+}
+
+export function validateCfpEditorConditionalRule(configuration: CfpConfiguration): string | null {
+  const conditions = ruleConditions(configuration.rule);
+  const sourceIsEmpty = conditions.every(
+    (condition) => !condition.field.trim() && !condition.value.trim(),
+  );
+  const target = configuration.ruleTargetField?.trim() ?? "";
+
+  if (sourceIsEmpty && !target) return null;
+  if (sourceIsEmpty) return "Conditional rule source field is required.";
+  if (!target) return "Conditional rule target field is required.";
+
+  const fields = cfpRuleFields(configuration);
+  const resolvedTarget = configuration.fields.find((field) => fieldStorageKey(field) === target);
+  if (resolvedTarget === undefined) {
+    return "Conditional rule target field must be a current form field.";
+  }
+
+  for (const condition of conditions) {
+    const source = condition.field.trim();
+    const value = condition.value.trim();
+    if (!source) return "Conditional rule source field is required.";
+    if (!value) return "Conditional rule source value is required.";
+
+    const resolvedSource = fields.find((field) => fieldStorageKey(field) === source);
+    if (resolvedSource === undefined) {
+      return "Conditional rule source field must be a current field.";
+    }
+    if (fieldStorageKey(resolvedSource) === fieldStorageKey(resolvedTarget)) {
+      return "Conditional rule target field must differ from the source field.";
+    }
+    if (!fieldOptionValues(resolvedSource).includes(value)) {
+      return "Conditional rule source value must be one of the selected field's options.";
+    }
+  }
+  return null;
 }
 
 function toEventConfiguration(
@@ -885,10 +1005,13 @@ export function toFormConfiguration(
         "submission",
       ),
     );
-  const editorRuleId = configuration.editorRuleId ?? "editor-conditional-rule";
-  const ruleRecords = [...(configuration.rules ?? [])].filter(
-    (rule) => !(typeof rule === "object" && rule !== null && rule.id === editorRuleId),
-  );
+  const editorRuleId = configuration.editorRuleId;
+  const ruleRecords =
+    editorRuleId === undefined
+      ? [...(configuration.rules ?? [])]
+      : [...(configuration.rules ?? [])].filter(
+          (rule) => !(typeof rule === "object" && rule !== null && rule.id === editorRuleId),
+        );
   const editorFields = [...fields, ...taxonomyFields].map(toEditorField);
   const generatedRule = editorConditionalRule(configuration, editorFields);
   const sections =
@@ -1001,7 +1124,10 @@ export async function persistCfpConfiguration(
   );
   if (dateError !== null) throw new Error(dateError);
 
-  const savedEvent = await api.saveEvent({
+  const conditionalRuleError = validateCfpEditorConditionalRule(input.configuration);
+  if (conditionalRuleError !== null) throw new Error(conditionalRuleError);
+
+  return api.saveConfiguration({
     organizationId: input.organizationId,
     eventId: input.eventId,
     event: toEventConfiguration(
@@ -1013,36 +1139,66 @@ export async function persistCfpConfiguration(
       input.organizationId,
       input.eventId,
     ),
-    expectedVersion: input.configuration.eventVersion ?? null,
+    form: toFormConfiguration(
+      {
+        ...input.configuration,
+        id: input.formId,
+        formVersion:
+          input.configuration.formVersion === undefined ? 1 : input.configuration.formVersion + 1,
+      },
+      input.organizationId,
+      input.eventId,
+    ),
+    expectedEventVersion: input.configuration.eventVersion ?? null,
+    expectedFormVersion: input.configuration.formVersion ?? null,
   });
-  const savedForm =
-    input.configuration.formVersion === undefined
-      ? await api.createForm({
-          organizationId: input.organizationId,
-          eventId: input.eventId,
-          form: toFormConfiguration(
-            { ...input.configuration, id: input.formId, formVersion: 1 },
-            input.organizationId,
-            input.eventId,
-          ),
-        })
-      : await api.saveForm({
-          organizationId: input.organizationId,
-          eventId: input.eventId,
-          form: toFormConfiguration(
-            {
-              ...input.configuration,
-              id: input.formId,
-              formVersion: input.configuration.formVersion + 1,
-            },
-            input.organizationId,
-            input.eventId,
-          ),
-          expectedVersion: input.configuration.formVersion,
-        });
-  return { event: savedEvent, form: savedForm };
 }
 
+function emptyEditorRule(): CfpCondition {
+  return { type: "condition", field: "", operator: "is", value: "" };
+}
+
+function canonicalEditorRule(
+  rule: Record<string, unknown>,
+  submissionFields: CfpFormConfiguration["submissionFields"],
+): { id: string; condition: CfpRule; target: string } | null {
+  if (typeof rule.id !== "string" || !Array.isArray(rule.actions) || rule.actions.length !== 1) {
+    return null;
+  }
+  const action = rule.actions[0];
+  if (
+    typeof action !== "object" ||
+    action === null ||
+    Array.isArray(action) ||
+    !hasExactKeys(action as Record<string, unknown>, ["type", "fieldKey"]) ||
+    action.type !== "show_field" ||
+    typeof action.fieldKey !== "string" ||
+    !submissionFields.some((field) => field.key === action.fieldKey)
+  ) {
+    return null;
+  }
+  if (!("when" in rule)) return null;
+  const condition = editorRuleCondition(rule.when);
+  return condition === null ? null : { id: rule.id, condition, target: action.fieldKey };
+}
+
+function recognizedEditorRule(
+  form: CfpFormConfiguration,
+  current: CfpConfiguration,
+): { id: string; condition: CfpRule; target: string } | null {
+  const canonicalRules = form.rules.flatMap((rule) => {
+    const candidate = canonicalEditorRule(rule, form.submissionFields);
+    return candidate === null ? [] : [candidate];
+  });
+  const knownIds = new Set(
+    ["editor-conditional-rule", current.editorRuleId].filter(
+      (id): id is string => typeof id === "string",
+    ),
+  );
+  const known = canonicalRules.find((rule) => knownIds.has(rule.id));
+  if (known !== undefined) return known;
+  return canonicalRules.length === 1 ? (canonicalRules[0] ?? null) : null;
+}
 export function configurationFromServer(
   current: CfpConfiguration,
   event: CfpEventConfiguration,
@@ -1077,33 +1233,9 @@ export function configurationFromServer(
     }
     return options.length > 0 ? options : fallback;
   };
-  const editorRule =
-    form.rules.find(
-      (rule) => rule.id === "editor-conditional-rule" && Array.isArray(rule.actions),
-    ) ??
-    form.rules.find(
-      (rule) =>
-        Array.isArray(rule.actions) &&
-        rule.actions.some(
-          (action) =>
-            typeof action === "object" &&
-            action !== null &&
-            action.type === "show_field" &&
-            typeof action.fieldKey === "string",
-        ),
-    );
-  const editorActions = editorRule && Array.isArray(editorRule.actions) ? editorRule.actions : [];
-  const editorAction = editorActions.find(
-    (action) =>
-      typeof action === "object" &&
-      action !== null &&
-      "fieldKey" in action &&
-      typeof action.fieldKey === "string",
-  );
-  const persistedRuleTarget =
-    editorAction && typeof editorAction.fieldKey === "string" ? editorAction.fieldKey : undefined;
-  const persistedEditorCondition =
-    editorRule && "when" in editorRule ? editorRuleCondition(editorRule.when) : null;
+  const editorRule = recognizedEditorRule(form, current);
+  const persistedRuleTarget = editorRule?.target;
+  const persistedEditorCondition = editorRule?.condition;
   const persistedRuleTargetLabel =
     persistedRuleTarget === undefined
       ? undefined
@@ -1145,13 +1277,10 @@ export function configurationFromServer(
     participantFields: form.participantFields.map(toEditorField),
     sections: form.sections.map((section) => ({ ...section })),
     rules: [...form.rules],
-    ...(typeof editorRule?.id === "string" ? { editorRuleId: editorRule.id } : {}),
-    rule: persistedEditorCondition ?? current.rule,
-    ruleAction:
-      persistedRuleTargetLabel === undefined
-        ? current.ruleAction
-        : `show ${persistedRuleTargetLabel}`,
-    ruleTargetField: persistedRuleTarget ?? current.ruleTargetField,
+    editorRuleId: editorRule?.id,
+    rule: persistedEditorCondition ?? emptyEditorRule(),
+    ruleAction: persistedRuleTargetLabel === undefined ? "" : `show ${persistedRuleTargetLabel}`,
+    ruleTargetField: persistedRuleTarget,
   };
 }
 
@@ -1179,31 +1308,48 @@ export function firstRuleCondition(rule: CfpRule): CfpCondition {
     : firstRuleCondition(nested);
 }
 
-function editorRuleCondition(value: unknown): CfpRule | null {
+function hasExactKeys(candidate: Record<string, unknown>, keys: readonly string[]): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(candidate).every((key) => allowed.has(key));
+}
+
+function editorRuleCondition(value: unknown, root = true): CfpRule | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const candidate = value as Record<string, unknown>;
-  if (candidate.type === "predicate" && typeof candidate.fieldKey === "string") {
-    const operator = candidate.operator === "not_equals" ? "is not" : "is";
+  if (candidate.type === "predicate") {
+    if (
+      !hasExactKeys(candidate, ["type", "fieldKey", "operator", "value"]) ||
+      typeof candidate.fieldKey !== "string" ||
+      (candidate.operator !== "equals" && candidate.operator !== "not_equals") ||
+      typeof candidate.value !== "string"
+    ) {
+      return null;
+    }
     return {
       type: "condition",
       field: candidate.fieldKey,
-      operator,
-      value: typeof candidate.value === "string" ? candidate.value : String(candidate.value ?? ""),
+      operator: candidate.operator === "not_equals" ? "is not" : "is",
+      value: candidate.value,
     };
   }
-  if (candidate.type !== "group" || !Array.isArray(candidate.conditions)) return null;
-  const conditions = candidate.conditions.flatMap((condition): CfpRule[] => {
-    const parsed = editorRuleCondition(condition);
-    return parsed === null ? [] : [parsed];
-  });
-  if (conditions.length === 0) return null;
-  if (conditions.length === 1 && conditions[0]?.type === "condition") {
-    return conditions[0];
+  if (
+    candidate.type !== "group" ||
+    (candidate.operator !== "all" && candidate.operator !== "any") ||
+    !Array.isArray(candidate.conditions) ||
+    candidate.conditions.length === 0 ||
+    !hasExactKeys(candidate, ["type", "operator", "conditions"])
+  ) {
+    return null;
+  }
+  const conditions = candidate.conditions.map((condition) => editorRuleCondition(condition, false));
+  if (conditions.some((condition) => condition === null)) return null;
+  if (root && candidate.operator === "all" && conditions.length === 1) {
+    return conditions[0] as CfpRule;
   }
   return {
     type: "group",
     operator: candidate.operator === "any" ? "OR" : "AND",
-    conditions,
+    conditions: conditions as CfpRule[],
   };
 }
 export function fieldOptionValues(field: CfpFormField | undefined): string[] {
