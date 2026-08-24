@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { useOrganizerPlanActions } from "./organizer-authoring-plan-actions";
 import type { OrganizerRoundActions } from "./organizer-authoring-round-actions";
@@ -7,6 +9,40 @@ import {
 } from "./organizer-organizer-workspace";
 import { reviewPlanClosesAtField } from "./review-temporal-policy";
 
+const authoringWorkbenchSource = readFileSync(
+  fileURLToPath(new URL("./organizer-authoring-workbench.tsx", import.meta.url)),
+  "utf8",
+);
+const workspaceStyles = readFileSync(
+  fileURLToPath(new URL("../review-workspace.module.css", import.meta.url)),
+  "utf8",
+);
+
+describe("review authoring action rail accessibility order", () => {
+  it("places actions before the editor and explicitly restores the visual grid order", () => {
+    expect(authoringWorkbenchSource.indexOf("<OrganizerPlanActionsView")).toBeLessThan(
+      authoringWorkbenchSource.indexOf("<OrganizerDraftPlan"),
+    );
+    expect(workspaceStyles).toContain(`.authoringMain {
+  grid-column: 1;
+  grid-row: 1;
+}`);
+    expect(workspaceStyles).toContain(`.authoringAside {
+  grid-column: 2;
+  grid-row: 1;
+}`);
+    expect(workspaceStyles).toContain(`.authoringMain {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .authoringAside {
+    position: static;
+    grid-column: 1;
+    grid-row: 1;
+  }`);
+  });
+});
 function unresolvedPlanScope(
   setMessage: (message: string | null) => void,
   status: "draft" | "open" = "draft",

@@ -9,6 +9,7 @@ export function OrganizerAuthoringWorkbench({
 }: Readonly<{ controller: OrganizerAuthoringController }>) {
   return (
     <div className={styles.authoringWorkbench} data-layout="plan-authoring-workbench">
+      <OrganizerPlanActionsView controller={controller} />
       <div className={styles.authoringMain}>
         {controller.isDraft ? (
           <OrganizerDraftPlan controller={controller} />
@@ -16,7 +17,6 @@ export function OrganizerAuthoringWorkbench({
           <OrganizerReadonlyPlan controller={controller} />
         )}
       </div>
-      <OrganizerPlanActionsView controller={controller} />
     </div>
   );
 }

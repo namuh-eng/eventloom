@@ -2955,6 +2955,15 @@
   gap: 1.5rem;
   align-items: start;
 }
+.authoringMain {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.authoringAside {
+  grid-column: 2;
+  grid-row: 1;
+}
 
 .authoringMain,
 .authoringReadOnly,
@@ -3397,8 +3406,14 @@
     grid-template-columns: 1fr;
   }
 
+  .authoringMain {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
   .authoringAside {
     position: static;
+    grid-column: 1;
     grid-row: 1;
   }
 

@@ -9,7 +9,7 @@ import { OrganizerRoundTargeting } from "./organizer-authoring-round-targeting";
 import {
   reviewLocalValue,
   reviewRoundScheduleField,
-  reviewTemporalConstraints,
+  reviewRoundScheduleConstraints,
 } from "./review-temporal-policy";
 export function OrganizerRoundEditor({
   controller,
@@ -26,7 +26,7 @@ export function OrganizerRoundEditor({
   const constraints =
     eventTimeZone === undefined || eventStartsAt === undefined || eventEndsAt === undefined
       ? undefined
-      : reviewTemporalConstraints({
+      : reviewRoundScheduleConstraints({
           timeZone: eventTimeZone,
           startsAt: eventStartsAt,
           endsAt: eventEndsAt,
@@ -87,7 +87,6 @@ export function OrganizerRoundEditor({
         endLabel="Round closes"
         eyebrow={`Round ${roundIndex + 1} schedule`}
         description="Choose the review window directly on the calendar."
-        minimumDateTime={constraints?.minimum}
         maximumDateTime={constraints?.maximum}
         unchangedValues={
           eventTimeZone === undefined
