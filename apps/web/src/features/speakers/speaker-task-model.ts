@@ -74,6 +74,15 @@ export function speakerOnboardingTaskDefinitions(
     left.definitionId.localeCompare(right.definitionId),
   );
 }
+export function speakerTaskAssigneeLabels(
+  participantIds: readonly string[],
+  speakers: readonly Pick<SpeakerRecord, "participantId" | "displayName">[],
+): readonly string[] {
+  const names = new Map(speakers.map((speaker) => [speaker.participantId, speaker.displayName]));
+  return participantIds.map(
+    (participantId) => names.get(participantId)?.trim() || "Unavailable speaker",
+  );
+}
 
 export function validateSpeakerTaskAssignment(
   draft: SpeakerOnboardingTaskDraft,

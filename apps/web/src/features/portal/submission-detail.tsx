@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { clearCfpSubmissionState } from "../cfp/draft-persistence";
+import { clearCfpDraftStorage } from "../cfp/draft-persistence";
 import { portalSubmissionIdsMatch, submissionStatusPresentation } from "./model";
 import styles from "./portal.module.css";
 import { usePortal } from "./portal-provider";
@@ -86,12 +86,12 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
           <Link
             className={styles.primaryButton}
             href={actionTargets.editHref}
-            onClick={() =>
-              window.localStorage.setItem(
-                actionTargets.pointerKey,
-                canonicalPortalSubmissionId(submission.id),
-              )
-            }
+            onClick={() => {
+              const submissionId = canonicalPortalSubmissionId(submission.id);
+              window.localStorage.setItem(actionTargets.pointerKey, submissionId);
+              window.sessionStorage.setItem(actionTargets.activePointerKey, submissionId);
+              window.sessionStorage.removeItem(actionTargets.newSubmissionIntentKey);
+            }}
           >
             Edit proposal
           </Link>
@@ -100,7 +100,13 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
             href={actionTargets.newProposalHref}
             onClick={() => {
               if (context === null || cfpEventSlug.length === 0) return;
-              clearCfpSubmissionState(cfpEventSlug, actionTargets.identity, window.localStorage);
+              const submissionId = canonicalPortalSubmissionId(submission.id);
+              if (window.localStorage.getItem(actionTargets.pointerKey) === submissionId) {
+                window.localStorage.removeItem(actionTargets.pointerKey);
+              }
+              clearCfpDraftStorage(cfpEventSlug, window.localStorage);
+              window.sessionStorage.removeItem(actionTargets.activePointerKey);
+              window.sessionStorage.setItem(actionTargets.newSubmissionIntentKey, "1");
             }}
           >
             Submit another proposal

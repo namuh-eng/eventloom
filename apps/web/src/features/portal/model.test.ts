@@ -531,11 +531,19 @@ describe("speaker portal view model", () => {
     expect(portalSubmissionEditTarget(context, submission)).toEqual({
       href: "/cfp/organizations/ai-engineer/events/devflow-conf-2027/submission",
       pointerKey: "eventloom:cfp-submission:v1:ai-engineer:devflow-conf-2027:devflow-conf-2027-cfp",
+      activePointerKey:
+        "eventloom:cfp-active-submission:v1:ai-engineer:devflow-conf-2027:devflow-conf-2027-cfp",
+      newSubmissionIntentKey:
+        "eventloom:cfp-new-submission:v1:ai-engineer:devflow-conf-2027:devflow-conf-2027-cfp",
     });
     expect(portalSubmissionActionTargets(context, submission)).toEqual({
       editHref: "/cfp/organizations/ai-engineer/events/devflow-conf-2027/submission",
       newProposalHref: "/cfp/organizations/ai-engineer/events/devflow-conf-2027",
       pointerKey: "eventloom:cfp-submission:v1:ai-engineer:devflow-conf-2027:devflow-conf-2027-cfp",
+      activePointerKey:
+        "eventloom:cfp-active-submission:v1:ai-engineer:devflow-conf-2027:devflow-conf-2027-cfp",
+      newSubmissionIntentKey:
+        "eventloom:cfp-new-submission:v1:ai-engineer:devflow-conf-2027:devflow-conf-2027-cfp",
       identity: {
         organizationId: "ai-engineer",
         eventId: "devflow-conf-2027",

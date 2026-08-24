@@ -33,6 +33,8 @@ export function clearCfpDraftStorage(
 
 const SUBMISSION_POINTER_PREFIX = "eventloom:cfp-submission:v1";
 const LEGACY_SUBMISSION_POINTER_PREFIX = "open-sessionboard:cfp-submission:v1";
+const ACTIVE_SUBMISSION_PREFIX = "eventloom:cfp-active-submission:v1";
+const NEW_SUBMISSION_INTENT_PREFIX = "eventloom:cfp-new-submission:v1";
 
 export interface CfpSubmissionPointerIdentity {
   organizationId: string;
@@ -46,6 +48,20 @@ export function getCfpSubmissionPointerStorageKey(
   formId: string,
 ): string {
   return `${SUBMISSION_POINTER_PREFIX}:${encodeURIComponent(organizationId)}:${encodeURIComponent(eventId)}:${encodeURIComponent(formId)}`;
+}
+export function getCfpActiveSubmissionStorageKey(
+  organizationId: string,
+  eventId: string,
+  formId: string,
+): string {
+  return `${ACTIVE_SUBMISSION_PREFIX}:${encodeURIComponent(organizationId)}:${encodeURIComponent(eventId)}:${encodeURIComponent(formId)}`;
+}
+export function getCfpNewSubmissionIntentStorageKey(
+  organizationId: string,
+  eventId: string,
+  formId: string,
+): string {
+  return `${NEW_SUBMISSION_INTENT_PREFIX}:${encodeURIComponent(organizationId)}:${encodeURIComponent(eventId)}:${encodeURIComponent(formId)}`;
 }
 
 function getLegacyCfpSubmissionPointerStorageKey(

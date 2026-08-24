@@ -101,6 +101,8 @@ export interface PortalSubmissionActionTargets {
   editHref: string;
   newProposalHref: string;
   pointerKey: string;
+  activePointerKey: string;
+  newSubmissionIntentKey: string;
   identity: CfpSubmissionPointerIdentity;
 }
 
@@ -124,6 +126,8 @@ export function portalSubmissionActionTargets(
     editHref: editTarget.href,
     newProposalHref: getCfpStepRoute(organizationId, eventSlug, "welcome"),
     pointerKey: editTarget.pointerKey,
+    activePointerKey: editTarget.activePointerKey,
+    newSubmissionIntentKey: editTarget.newSubmissionIntentKey,
     identity: { organizationId, eventId: context.eventId, formId },
   };
 }

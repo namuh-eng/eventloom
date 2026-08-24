@@ -126,7 +126,7 @@ import {
   statusLabel,
   taskComplete,
 } from "./speaker-roster-logic";
-import { taskStatusLabel, taskStatusTone } from "./speaker-task-model";
+import { speakerTaskAssigneeLabels, taskStatusLabel, taskStatusTone } from "./speaker-task-model";
 import {
   deadlineAfterEventWarning,
   deadlineTemporalPolicy,
@@ -1600,16 +1600,7 @@ function SpeakerTaskAssignmentSection({
                       <TableHead scope="row">{definition.title}</TableHead>
                       <TableCell>{dateLabel(definition.dueAt)}</TableCell>
                       <TableCell>
-                        {definition.participantIds
-                          .map((participantId) => {
-                            const assignee = speakers.find(
-                              (speaker) => speaker.participantId === participantId,
-                            );
-                            return assignee === undefined
-                              ? participantId
-                              : `${assignee.displayName} (${participantId})`;
-                          })
-                          .join(", ")}
+                        {speakerTaskAssigneeLabels(definition.participantIds, speakers).join(", ")}
                       </TableCell>
                     </TableRow>
                   ))}

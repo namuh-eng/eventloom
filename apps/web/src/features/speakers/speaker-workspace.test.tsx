@@ -40,6 +40,7 @@ import {
   retainInvitationHistory,
   speakerInvitationReady,
   speakerOnboardingTaskDefinitions,
+  speakerTaskAssigneeLabels,
   taskStatusTone,
   travelLogisticsFor,
   validateSpeakerTaskAssignment,
@@ -1164,6 +1165,15 @@ describe("speaker workspace contracts", () => {
       dueAt: "2027-04-09",
       participantIds: ["participant-1", "participant-2"],
     });
+  });
+
+  it("uses speaker names instead of internal IDs for onboarding assignees", () => {
+    expect(
+      speakerTaskAssigneeLabels(
+        ["participant-1", "missing-participant"],
+        [{ participantId: "participant-1", displayName: "Priya Raman" }],
+      ),
+    ).toEqual(["Priya Raman", "Unavailable speaker"]);
   });
 
   it("maps logistics fields and retains terminal invitation results without replacing history", () => {

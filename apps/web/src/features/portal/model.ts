@@ -1,3 +1,8 @@
+import {
+  getCfpActiveSubmissionStorageKey,
+  getCfpSubmissionPointerStorageKey,
+  getCfpNewSubmissionIntentStorageKey,
+} from "../cfp/draft-persistence";
 import { getCfpStepRoute } from "../cfp/routes";
 import type {
   PortalAsset,
@@ -547,7 +552,12 @@ export function portalIdentityProfile(
 export function portalSubmissionEditTarget(
   context: PortalContext | null,
   submission: PortalSubmission,
-): { href: string; pointerKey: string } | null {
+): {
+  href: string;
+  pointerKey: string;
+  activePointerKey: string;
+  newSubmissionIntentKey: string;
+} | null {
   if (
     context === null ||
     submission.formId === undefined ||
@@ -568,9 +578,21 @@ export function portalSubmissionEditTarget(
   if (!organizationId) return null;
   return {
     href: getCfpStepRoute(organizationId, eventSlug, "submission"),
-    pointerKey: `eventloom:cfp-submission:v1:${encodeURIComponent(
+    pointerKey: getCfpSubmissionPointerStorageKey(
       organizationId,
-    )}:${encodeURIComponent(context.eventId)}:${encodeURIComponent(submission.formId)}`,
+      context.eventId,
+      submission.formId,
+    ),
+    activePointerKey: getCfpActiveSubmissionStorageKey(
+      organizationId,
+      context.eventId,
+      submission.formId,
+    ),
+    newSubmissionIntentKey: getCfpNewSubmissionIntentStorageKey(
+      organizationId,
+      context.eventId,
+      submission.formId,
+    ),
   };
 }
 
