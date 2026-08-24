@@ -2460,7 +2460,13 @@ type AcceptanceIdempotencyRow = {
 
 function acceptanceDatabase(
   events: string[],
-  options: { readonly speakerGrantAvailable?: boolean } = {},
+  options: {
+    readonly speakerGrantAvailable?: boolean;
+    readonly decisionStatusesByParticipantPlan?: ReadonlyMap<
+      string,
+      readonly ("accepted" | "waitlisted" | "rejected")[]
+    >;
+  } = {},
 ): {
   readonly database: NonNullable<RuntimeBindings["DB"]>;
   readonly outbox: Map<
@@ -2476,6 +2482,7 @@ function acceptanceDatabase(
     }
   >;
   readonly grants: string[];
+  readonly audiences: Map<string, Set<string>>;
 } {
   const idempotency = new Map<string, AcceptanceIdempotencyRow>();
   const outbox = new Map<
@@ -2491,6 +2498,7 @@ function acceptanceDatabase(
     }
   >();
   const grants: string[] = [];
+  const audiences = new Map<string, Set<string>>();
   const database = {
     prepare(query: string) {
       return {
@@ -2632,15 +2640,64 @@ function acceptanceDatabase(
               }
               return { success: true, meta: { changes: 1 } };
             },
+            query,
+            values,
           };
         },
       };
     },
-    async batch() {
+    async batch(statements: unknown[]) {
+      for (const statement of statements) {
+        const { query, values } = statement as {
+          readonly query: string;
+          readonly values: readonly unknown[];
+        };
+        if (query.includes("DELETE FROM communication_recipient_audiences")) {
+          const recipientId = String(values[2]);
+          const memberships = audiences.get(recipientId);
+          if (memberships === undefined) continue;
+          if (query.includes("AND audience = ?")) {
+            const audience = String(values[3]);
+            const status =
+              audience === "accepted_participants"
+                ? "accepted"
+                : audience === "waitlisted_participants"
+                  ? "waitlisted"
+                  : "rejected";
+            if (
+              !options.decisionStatusesByParticipantPlan
+                ?.get(`${recipientId}:${String(values[7])}`)
+                ?.includes(status)
+            ) {
+              memberships.delete(audience);
+            }
+          } else {
+            memberships.delete("accepted_participants");
+            memberships.delete("waitlisted_participants");
+            memberships.delete("rejected_participants");
+          }
+          continue;
+        }
+        if (query.includes("INSERT INTO communication_recipient_audiences")) {
+          const recipientId = String(values[2]);
+          const audience = String(values[3]);
+          const memberships = audiences.get(recipientId) ?? new Set<string>();
+          if (
+            memberships.has(audience) &&
+            !query.includes(
+              "ON CONFLICT(organization_id, event_id, recipient_id, audience) DO NOTHING",
+            )
+          ) {
+            throw new Error("Duplicate communication recipient audience.");
+          }
+          memberships.add(audience);
+          audiences.set(recipientId, memberships);
+        }
+      }
       return [];
     },
   } as unknown as NonNullable<RuntimeBindings["DB"]>;
-  return { database, outbox, grants };
+  return { database, outbox, grants, audiences };
 }
 
 function acceptanceTransport(events: string[]): {
@@ -2658,9 +2715,13 @@ function acceptanceTransport(events: string[]): {
 }
 
 describe("production agenda, portal, acceptance, and reminder boundaries", () => {
-  it("queues exactly one canonical accepted and rejected decision communication", async () => {
+  it("preserves independent accepted and rejected audiences for one participant", async () => {
     const events: string[] = [];
-    const { database, outbox } = acceptanceDatabase(events);
+    const { database, outbox, audiences } = acceptanceDatabase(events, {
+      decisionStatusesByParticipantPlan: new Map([
+        ["participant-shared:plan-1", ["accepted", "rejected"]],
+      ]),
+    });
     const queueMessages: CloudflareOutboxMessage[] = [];
     const submissionFor = (submissionId: string, participantId: string): Submission => ({
       id: submissionId,
@@ -2690,8 +2751,8 @@ describe("production agenda, portal, acceptance, and reminder boundaries", () =>
       submittedAt: "2099-08-15T03:00:00.000Z",
     });
     const submissions = new Map([
-      ["submission-accepted", submissionFor("submission-accepted", "participant-accepted")],
-      ["submission-rejected", submissionFor("submission-rejected", "participant-rejected")],
+      ["submission-accepted", submissionFor("submission-accepted", "participant-shared")],
+      ["submission-rejected", submissionFor("submission-rejected", "participant-shared")],
     ]);
     const projection = new AirtableEvaluationDecisionProjection(
       {
@@ -2765,6 +2826,10 @@ describe("production agenda, portal, acceptance, and reminder boundaries", () =>
       }),
     ]);
     expect(queueMessages).toHaveLength(2);
+    expect([...(audiences.get("participant-shared") ?? [])].sort()).toEqual([
+      "accepted_participants",
+      "rejected_participants",
+    ]);
   });
 
   it("loads the authoritative agenda workspace with one Airtable request", async () => {

@@ -7934,20 +7934,52 @@ export class AirtableEvaluationDecisionProjection {
             updatedAt,
             ...decisionFenceValues,
           ),
-        this.database
-          .prepare(
-            `DELETE FROM communication_recipient_audiences
-              WHERE organization_id = ? AND event_id = ? AND recipient_id = ?
-                AND audience IN ('accepted_participants','waitlisted_participants','rejected_participants')
-                AND ${decisionFenceSql}`,
-          )
-          .bind(input.tenantId, input.eventId, participant.id, ...decisionFenceValues),
+        ...(["accepted", "waitlisted", "rejected"] as const).map((status) => {
+          const audience =
+            status === "accepted"
+              ? "accepted_participants"
+              : status === "waitlisted"
+                ? "waitlisted_participants"
+                : "rejected_participants";
+          return this.database
+            .prepare(
+              `DELETE FROM communication_recipient_audiences
+                WHERE organization_id = ? AND event_id = ? AND recipient_id = ? AND audience = ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM submission_participants AS participant_submission
+                    JOIN evaluation_decisions AS participant_decision
+                      ON participant_decision.organization_id = participant_submission.organization_id
+                     AND participant_decision.event_id = participant_submission.event_id
+                     AND participant_decision.submission_id = participant_submission.submission_id
+                    WHERE participant_submission.organization_id = ?
+                      AND participant_submission.event_id = ?
+                      AND participant_submission.participant_id = ?
+                      AND participant_decision.plan_id = ?
+                      AND participant_decision.status = ?
+                  )
+                  AND ${decisionFenceSql}`,
+            )
+            .bind(
+              input.tenantId,
+              input.eventId,
+              participant.id,
+              audience,
+              input.tenantId,
+              input.eventId,
+              participant.id,
+              input.planId,
+              status,
+              ...decisionFenceValues,
+            );
+        }),
         this.database
           .prepare(
             `INSERT INTO communication_recipient_audiences
                (organization_id, event_id, recipient_id, audience)
              SELECT ?, ?, ?, ?
-             WHERE ${decisionFenceSql}`,
+             WHERE ${decisionFenceSql}
+             ON CONFLICT(organization_id, event_id, recipient_id, audience) DO NOTHING`,
           )
           .bind(
             input.tenantId,
