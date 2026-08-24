@@ -34,14 +34,6 @@ export function reviewTemporalConstraints(
   };
 }
 
-export function reviewRoundScheduleConstraints(
-  event: ReviewEventTemporalContext,
-): Readonly<{ maximum: string }> {
-  return {
-    maximum: reviewLocalValue(event.endsAt, event.timeZone),
-  };
-}
-
 export function reviewExtendsPastEventStart(
   boundaries: readonly (string | null | undefined)[],
   eventStartsAt: string,

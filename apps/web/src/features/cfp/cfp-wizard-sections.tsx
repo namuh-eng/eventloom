@@ -389,6 +389,7 @@ interface CfpWizardSectionsProps {
   staleFormConflict: { submissionId: string | null; pinnedDraftUnavailable: boolean } | null;
   submissionsClosed: boolean;
   saveError: string | null;
+  pinnedDraftAuthenticationRequired: boolean;
   saveState: "idle" | "saving" | "saved" | "error";
   mutationPending: boolean;
   formRef: React.MutableRefObject<HTMLFormElement | null>;
@@ -420,6 +421,7 @@ interface CfpWizardSectionsProps {
   onSaveNow: () => void;
   onRefreshPinnedDraft: () => void;
   onDiscardStaleDraft: () => void;
+  onSwitchPinnedDraftAccount: () => void;
 }
 
 export function PublicCfpShell({
@@ -2020,6 +2022,8 @@ export function CfpWizardSections({
   onSaveNow,
   onRefreshPinnedDraft,
   onDiscardStaleDraft,
+  pinnedDraftAuthenticationRequired,
+  onSwitchPinnedDraftAccount,
 }: CfpWizardSectionsProps) {
   const accountHref = getCfpStepRoute(
     identity?.organizationId ?? published.organization.id,
@@ -2228,16 +2232,23 @@ export function CfpWizardSections({
         </div>
       ) : null}
       {step !== "welcome" ? (
-        <p
-          aria-live="polite"
-          className={saveState === "error" ? styles.saveError : styles.saveStatus}
-        >
-          {saveState === "saving" ? "Saving draft…" : null}
-          {saveState === "saved" ? "Draft saved" : null}
-          {saveState === "error" && staleFormConflict === null
-            ? (saveError ?? "Draft could not be saved. Check your connection and try again.")
-            : null}
-        </p>
+        <>
+          <p
+            aria-live="polite"
+            className={saveState === "error" ? styles.saveError : styles.saveStatus}
+          >
+            {saveState === "saving" ? "Saving draft…" : null}
+            {saveState === "saved" ? "Draft saved" : null}
+            {saveState === "error" && staleFormConflict === null
+              ? (saveError ?? "Draft could not be saved. Check your connection and try again.")
+              : null}
+          </p>
+          {pinnedDraftAuthenticationRequired ? (
+            <Button onClick={onSwitchPinnedDraftAccount} type="button" variant="secondary">
+              Sign out and switch account
+            </Button>
+          ) : null}
+        </>
       ) : null}
     </PublicCfpShell>
   );

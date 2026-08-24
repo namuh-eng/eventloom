@@ -2462,7 +2462,7 @@ function acceptanceDatabase(
   events: string[],
   options: {
     readonly speakerGrantAvailable?: boolean;
-    readonly decisionStatusesByParticipantPlan?: ReadonlyMap<
+    readonly decisionStatusesByParticipant?: ReadonlyMap<
       string,
       readonly ("accepted" | "waitlisted" | "rejected")[]
     >;
@@ -2664,11 +2664,7 @@ function acceptanceDatabase(
                 : audience === "waitlisted_participants"
                   ? "waitlisted"
                   : "rejected";
-            if (
-              !options.decisionStatusesByParticipantPlan
-                ?.get(`${recipientId}:${String(values[7])}`)
-                ?.includes(status)
-            ) {
+            if (!options.decisionStatusesByParticipant?.get(recipientId)?.includes(status)) {
               memberships.delete(audience);
             }
           } else {
@@ -2718,9 +2714,7 @@ describe("production agenda, portal, acceptance, and reminder boundaries", () =>
   it("preserves independent accepted and rejected audiences for one participant", async () => {
     const events: string[] = [];
     const { database, outbox, audiences } = acceptanceDatabase(events, {
-      decisionStatusesByParticipantPlan: new Map([
-        ["participant-shared:plan-1", ["accepted", "rejected"]],
-      ]),
+      decisionStatusesByParticipant: new Map([["participant-shared", ["accepted", "rejected"]]]),
     });
     const queueMessages: CloudflareOutboxMessage[] = [];
     const submissionFor = (submissionId: string, participantId: string): Submission => ({
@@ -2773,11 +2767,12 @@ describe("production agenda, portal, acceptance, and reminder boundaries", () =>
     );
     const decisionInput = (
       submissionId: string,
+      planId: string,
       status: "accepted" | "rejected",
     ): EvaluationDecisionProjectionInput => ({
       tenantId: "organization-1",
       eventId: "event-1",
-      planId: "plan-1",
+      planId,
       submissionId,
       decisionId: `decision-${submissionId}`,
       decisionVersion: 1,
@@ -2786,7 +2781,7 @@ describe("production agenda, portal, acceptance, and reminder boundaries", () =>
       reason: status === "accepted" ? "Accepted." : "Rejected.",
       decidedByUserId: "organizer-1",
       decidedAt: "2099-08-15T04:00:00.000Z",
-      idempotencyKey: `evaluation-decision:plan-1:${submissionId}:v1`,
+      idempotencyKey: `evaluation-decision:${planId}:${submissionId}:v1`,
       participantProjection: {
         status,
         reason: status === "accepted" ? "Accepted." : "Rejected.",
@@ -2797,8 +2792,8 @@ describe("production agenda, portal, acceptance, and reminder boundaries", () =>
         templatePurpose: status === "accepted" ? "decision_accepted" : "decision_rejected",
       },
     });
-    const accepted = decisionInput("submission-accepted", "accepted");
-    const rejected = decisionInput("submission-rejected", "rejected");
+    const accepted = decisionInput("submission-accepted", "plan-accepted", "accepted");
+    const rejected = decisionInput("submission-rejected", "plan-rejected", "rejected");
 
     await projection.projectDecision(accepted);
     await projection.projectDecision(rejected);
@@ -2817,12 +2812,12 @@ describe("production agenda, portal, acceptance, and reminder boundaries", () =>
       expect.objectContaining({
         purpose: "decision",
         status: "accepted",
-        idempotencyKey: "decision:evaluation-decision:plan-1:submission-accepted:v1",
+        idempotencyKey: "decision:evaluation-decision:plan-accepted:submission-accepted:v1",
       }),
       expect.objectContaining({
         purpose: "decision",
         status: "rejected",
-        idempotencyKey: "decision:evaluation-decision:plan-1:submission-rejected:v1",
+        idempotencyKey: "decision:evaluation-decision:plan-rejected:submission-rejected:v1",
       }),
     ]);
     expect(queueMessages).toHaveLength(2);

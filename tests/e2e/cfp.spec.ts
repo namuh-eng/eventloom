@@ -1152,7 +1152,7 @@ interface DynamicCfpSubmission {
   ownerAccountId: string;
   formVersion: number;
   version: number;
-  status: "draft" | "submitted";
+  status: "draft" | "submitted" | "withdrawn";
   completedSteps: string[];
   answers: Record<string, unknown>;
   participants: DynamicCfpParticipant[];
@@ -1181,6 +1181,8 @@ interface DynamicCfpHarnessOptions {
   unauthorizedPointerAlways?: boolean;
   conflictOnDraftPatch?: number;
   initialAnswers?: Record<string, unknown>;
+  withdrawnPointer?: boolean;
+  replacementPointer?: string;
 }
 
 function cfpRecord(value: unknown): Record<string, unknown> | null {
@@ -1248,7 +1250,7 @@ async function installDynamicCfpApi(
     ownerAccountId: session.userId,
     formVersion: CFP_FORM_VERSION,
     version: 1,
-    status: "draft",
+    status: options.withdrawnPointer ? "withdrawn" : "draft",
     completedSteps: ["welcome"],
     answers: cloneCfp(
       options.initialAnswers ?? {
@@ -1338,6 +1340,11 @@ async function installDynamicCfpApi(
       });
       return;
     }
+    if (request.method() === "POST" && url.pathname === "/api/auth/sign-out") {
+      authenticated = false;
+      await route.fulfill({ status: 204 });
+      return;
+    }
 
     const publicPath = `/api/public/cfp/organizations/${CFP_ORGANIZATION_ID}/events/${CFP_EVENT_ID}`;
     const apiPath = `/api/cfp/organizations/${CFP_ORGANIZATION_ID}/events/${CFP_EVENT_ID}`;
@@ -1355,10 +1362,11 @@ async function installDynamicCfpApi(
       return;
     }
 
+    const draftSubmissionId = url.pathname.match(/\/submissions\/([^/]+)\/draft$/u)?.[1];
     if (
       request.method() === "GET" &&
-      url.pathname.startsWith(`${apiPath}/`) &&
-      url.pathname.endsWith(`/submissions/${CFP_SUBMISSION_ID}/draft`)
+      draftSubmissionId !== undefined &&
+      (draftSubmissionId === CFP_SUBMISSION_ID || draftSubmissionId === options.replacementPointer)
     ) {
       draftLoads.push(request);
       if (unauthorizedPointerLoadsRemaining > 0) {
@@ -1384,12 +1392,20 @@ async function installDynamicCfpApi(
         });
         return;
       }
-      await fulfillCfpJson(route, cloneCfp(submission));
+      await fulfillCfpJson(
+        route,
+        cloneCfp(
+          draftSubmissionId === options.replacementPointer
+            ? { ...submission, id: draftSubmissionId, status: "draft" as const }
+            : submission,
+        ),
+      );
       return;
     }
 
     if (request.method() === "POST" && url.pathname === `${apiPath}/forms/${CFP_FORM_ID}/drafts`) {
       submission.version = 1;
+      submission.status = "draft";
       await fulfillCfpJson(route, cloneCfp(submission), 201);
       return;
     }
@@ -1935,7 +1951,7 @@ test("CFP keeps each tab bound to its hydrated proposal across step remounts", a
     CFP_SUBMISSION_ID,
   );
 });
-test("CFP keeps a protected pointer fail-closed for the wrong account", async ({
+test("CFP lets a wrong account explicitly sign out before switching to a protected draft owner", async ({
   authSession,
   page,
 }) => {
@@ -1957,7 +1973,9 @@ test("CFP keeps a protected pointer fail-closed for the wrong account", async ({
   await page.getByRole("button", { name: "Sign in and continue" }).click();
 
   await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/account$`));
-  await expect(page.getByText("Authentication is required.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sign out and switch account" })).toBeVisible();
+  await page.getByRole("button", { name: "Sign out and switch account" }).click();
+  await expect(page).toHaveURL(/\/login\?next=/u);
   expect(
     harness.requests.filter(
       (request) =>
@@ -1968,6 +1986,71 @@ test("CFP keeps a protected pointer fail-closed for the wrong account", async ({
   ).toHaveLength(0);
   expect(await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), key)).toBe(
     CFP_SUBMISSION_ID,
+  );
+});
+test("CFP releases a matching withdrawn pointer so an authenticated account can create a replacement", async ({
+  authSession,
+  page,
+}) => {
+  const harness = await installDynamicCfpApi(page, authSession, {
+    unauthenticatedStartup: true,
+    withdrawnPointer: true,
+  });
+  const key = pointerKey();
+  await page.addInitScript(
+    (pointer) => {
+      window.localStorage.setItem(pointer.key, pointer.value);
+    },
+    { key, value: CFP_SUBMISSION_ID },
+  );
+
+  await page.goto(`${CFP_PATH}/account`);
+  await page.getByLabel("Email address").fill(authSession.email);
+  await page.getByLabel("Password").fill("StrongPass1!");
+  await page.getByRole("button", { name: "Sign in and continue" }).click();
+  await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/submission$`));
+  expect(
+    harness.requests.filter(
+      (request) =>
+        request.method() === "POST" && request.url().endsWith(`/forms/${CFP_FORM_ID}/drafts`),
+    ),
+  ).toHaveLength(1);
+  expect(await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), key)).toBe(
+    CFP_SUBMISSION_ID,
+  );
+});
+test("CFP preserves a newer pointer selected while a withdrawn draft is loading", async ({
+  authSession,
+  page,
+}) => {
+  const replacementPointer = "submission-selected-in-other-tab";
+  await installDynamicCfpApi(page, authSession, {
+    replacementPointer,
+    unauthenticatedStartup: true,
+    withdrawnPointer: true,
+  });
+  const key = pointerKey();
+  await page.addInitScript(
+    (pointer) => {
+      window.localStorage.setItem(pointer.key, pointer.value);
+    },
+    { key, value: CFP_SUBMISSION_ID },
+  );
+  await page.route(`**/submissions/${CFP_SUBMISSION_ID}/draft`, async (route) => {
+    await page.evaluate(
+      ({ storageKey, replacement }) => window.localStorage.setItem(storageKey, replacement),
+      { storageKey: key, replacement: replacementPointer },
+    );
+    await route.fallback();
+  });
+
+  await page.goto(`${CFP_PATH}/account`);
+  await page.getByLabel("Email address").fill(authSession.email);
+  await page.getByLabel("Password").fill("StrongPass1!");
+  await page.getByRole("button", { name: "Sign in and continue" }).click();
+  await expect(page.getByLabel("Email address")).toHaveValue(authSession.email);
+  expect(await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), key)).toBe(
+    replacementPointer,
   );
 });
 test("CFP clears a stale saved pointer and starts a fresh account step", async ({

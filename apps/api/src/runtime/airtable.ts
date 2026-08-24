@@ -7955,7 +7955,6 @@ export class AirtableEvaluationDecisionProjection {
                     WHERE participant_submission.organization_id = ?
                       AND participant_submission.event_id = ?
                       AND participant_submission.participant_id = ?
-                      AND participant_decision.plan_id = ?
                       AND participant_decision.status = ?
                   )
                   AND ${decisionFenceSql}`,
@@ -7968,7 +7967,6 @@ export class AirtableEvaluationDecisionProjection {
               input.tenantId,
               input.eventId,
               participant.id,
-              input.planId,
               status,
               ...decisionFenceValues,
             );
