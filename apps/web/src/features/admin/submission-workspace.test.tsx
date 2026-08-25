@@ -873,7 +873,7 @@ describe("organizer submission workspace", () => {
       expect.objectContaining({ status: "in_progress" }),
     ]);
   });
-  it("moves detail review data to the highest assigned round", () => {
+  it("moves detail review data to the highest round including an abstention", () => {
     const workspace: OrganizerEvaluationWorkspace = {
       plan: {
         id: "plan-1",
@@ -919,7 +919,7 @@ describe("organizer submission workspace", () => {
           reviewerId: "reviewer-2",
           submissionId: canonicalEnvelope.submission.id,
           roundId: "round-final",
-          status: "in_progress",
+          status: "abstained",
         },
       ],
       aggregates: [
@@ -957,7 +957,7 @@ describe("organizer submission workspace", () => {
       maxScore: 30,
     });
     expect(submission.reviewAssignments).toEqual([
-      expect.objectContaining({ status: "in_progress" }),
+      expect.objectContaining({ status: "abstained" }),
     ]);
   });
   it("falls back to the initial round when a submission has no assignments", () => {

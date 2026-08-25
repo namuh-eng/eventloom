@@ -779,7 +779,6 @@ export function indexOrganizerEvaluationWorkspace(
     OrganizerEvaluationWorkspace["resultScopes"][number]
   >();
   for (const assignment of workspace.assignments) {
-    if (assignment.status === "abstained") continue;
     const candidate = scopeByKey.get(evaluationScopeKey(assignment.planId, assignment.roundId));
     if (candidate === undefined) continue;
     const current = sourceScopeBySubmissionId.get(assignment.submissionId);
