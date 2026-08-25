@@ -16,7 +16,10 @@ export function OrganizerDecisionsPanel({
     baseUrl,
     selectedRoundId,
     setSelectedRoundId,
-    selectedRound,
+    selectedResultScope,
+    selectedResultScopeKey,
+    resultScopes,
+    isActiveResultScope,
     aggregateLoading,
     aggregateError,
     aggregateSort,
@@ -39,6 +42,15 @@ export function OrganizerDecisionsPanel({
     setView,
     reviewerMembers,
   } = controller;
+  const selectedScopeLabel =
+    selectedResultScope === undefined
+      ? selectedRoundId
+      : selectedResultScope.historical
+        ? `Historical · ${selectedResultScope.planName} — ${selectedResultScope.roundName}`
+        : selectedResultScope.roundName;
+  const scopeController = isActiveResultScope
+    ? controller
+    : { ...controller, seed: { ...seed, decisionBySubmission: {} } };
   if (seed.status === "draft") {
     return (
       <section className={styles.section} aria-labelledby="aggregate-heading">
@@ -77,36 +89,47 @@ export function OrganizerDecisionsPanel({
           >
             Sort score {aggregateSort === "descending" ? "ascending" : "descending"}
           </Button>
-          <OrganizerResultsExportControls
-            run={exportRun}
-            creating={exportCreating}
-            requestError={exportRequestError}
-            onExport={() => void exportResults()}
-          />
+          {isActiveResultScope ? (
+            <OrganizerResultsExportControls
+              run={exportRun}
+              creating={exportCreating}
+              requestError={exportRequestError}
+              onExport={() => void exportResults()}
+            />
+          ) : null}
         </div>
       </div>
       <div className={`${styles.formField} ${styles.resultsRoundField}`}>
         <label htmlFor="organizer-aggregate-round">Review round</label>
         <select
           id="organizer-aggregate-round"
-          value={selectedRoundId}
+          value={selectedResultScopeKey}
           onChange={(event) => {
             setSelectedRoundId(event.currentTarget.value);
             setSelectedDecisionId(null);
           }}
           disabled={aggregateLoading}
         >
-          {seed.rounds.map((round) => (
-            <option value={round.id} key={round.id}>
-              {round.name}
+          {resultScopes.map((scope) => (
+            <option
+              value={JSON.stringify([scope.planId, scope.roundId])}
+              key={JSON.stringify([scope.planId, scope.roundId])}
+            >
+              {scope.historical
+                ? `Historical · ${scope.planName} — ${scope.roundName}`
+                : scope.roundName}
             </option>
           ))}
         </select>
-        <span className={styles.fieldHint}>Uses this round&apos;s saved scorecard.</span>
+        <span className={styles.fieldHint}>
+          {isActiveResultScope
+            ? "Uses this round's saved scorecard."
+            : "Historical results are read-only and retain their original scorecard."}
+        </span>
       </div>
       {aggregateLoading ? (
         <p className={styles.fieldHint} role="status">
-          Loading aggregates for {roundDisplayLabel(selectedRound?.name)}…
+          Loading aggregates for {roundDisplayLabel(selectedScopeLabel)}…
         </p>
       ) : null}
       {aggregateError ? (
@@ -115,7 +138,7 @@ export function OrganizerDecisionsPanel({
         </p>
       ) : null}
       <p className={styles.fieldHint} data-testid="round-results-status">
-        Showing {selectedRound?.name ?? selectedRoundId} results.
+        Showing {selectedScopeLabel} results.
       </p>
       <div className={styles.collectionToolbar}>
         <div className={styles.formField}>
@@ -162,7 +185,7 @@ export function OrganizerDecisionsPanel({
           Showing {visibleDecisionRows.length} of {filteredDecisionRows.length} matching submissions
         </p>
       </div>
-      <OrganizerDecisionTable controller={controller} />
+      <OrganizerDecisionTable controller={scopeController} />
       {selectedAggregate ? (
         <div
           ref={decisionEditorRef}
@@ -173,18 +196,24 @@ export function OrganizerDecisionsPanel({
           <OrganizerSubmittedReviews
             reviews={seed.submittedReviews.filter(
               (review) =>
-                review.submissionId === selectedAggregate.id && review.roundId === selectedRoundId,
+                review.submissionId === selectedAggregate.id &&
+                review.planId === selectedResultScope?.planId &&
+                review.roundId === selectedRoundId,
             )}
             reviewerMembers={reviewerMembers}
           />
-          <DecisionEditor
-            key={`${selectedAggregate.id}:${seed.decisionBySubmission[selectedAggregate.id]?.version ?? 0}`}
-            aggregate={selectedAggregate}
-            baseUrl={baseUrl}
-            planId={seed.planId}
-            decision={seed.decisionBySubmission[selectedAggregate.id]}
-            onSaved={(decision) => controller.recordDecision(selectedAggregate.id, decision)}
-          />
+          {isActiveResultScope ? (
+            <DecisionEditor
+              key={`${selectedAggregate.id}:${seed.decisionBySubmission[selectedAggregate.id]?.version ?? 0}`}
+              aggregate={selectedAggregate}
+              baseUrl={baseUrl}
+              planId={seed.planId}
+              decision={seed.decisionBySubmission[selectedAggregate.id]}
+              onSaved={(decision) => controller.recordDecision(selectedAggregate.id, decision)}
+            />
+          ) : (
+            <p className={styles.fieldHint}>Historical decisions are read-only.</p>
+          )}
         </div>
       ) : (
         <p className={styles.fieldHint}>Choose Review in the table to open one decision editor.</p>

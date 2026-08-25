@@ -10,11 +10,7 @@ import {
   invalidInput,
   notFound,
 } from "./errors";
-import type {
-  EvaluationRepository,
-  OrganizerWorkspaceRecords,
-  SubmissionReviewSource,
-} from "./repository";
+import type { EvaluationRepository, SubmissionReviewSource } from "./repository";
 import { MAX_REVISION_DEPTH, revisionScheduleSnapshot } from "./revision-schedule-sync";
 import {
   isEnglishSuggestionRationale,
@@ -257,12 +253,19 @@ export interface EvaluationReviewerWorkspaceAssignment extends ReviewContext {
 export interface EvaluationReviewerWorkspace {
   readonly assignments: readonly EvaluationReviewerWorkspaceAssignment[];
 }
-export interface EvaluationOrganizerWorkspaceDiagnostic {
-  readonly code: "decisions_unavailable";
-  readonly message: string;
+export interface EvaluationOrganizerResultScope {
+  readonly planId: string;
+  readonly planVersion: number;
+  readonly lineageOrdinal: number;
+  readonly planName: string;
+  readonly roundId: string;
+  readonly roundName: string;
+  readonly sequence: number;
+  readonly historical: boolean;
 }
 export interface EvaluationOrganizerSubmittedReview {
   readonly id: string;
+  readonly planId: string;
   readonly roundId: string;
   readonly submissionId: string;
   readonly reviewerId: string;
@@ -275,10 +278,10 @@ export interface EvaluationOrganizerWorkspace {
   readonly submissions: readonly EvaluationSubmissionRecord[];
   readonly assignments: readonly EvaluationAssignment[];
   readonly progress: EvaluationProgress;
+  readonly resultScopes: readonly EvaluationOrganizerResultScope[];
   readonly aggregates: readonly EvaluationAggregate[];
   readonly submittedReviews: readonly EvaluationOrganizerSubmittedReview[];
   readonly decisions: Readonly<Record<string, EvaluationDecision>>;
-  readonly diagnostics?: readonly EvaluationOrganizerWorkspaceDiagnostic[];
 }
 
 export interface EvaluationOrganizerReviewExportSnapshot {
@@ -729,22 +732,56 @@ function aggregateForSubmission(
   submissionId: string,
   assignments: readonly EvaluationAssignment[],
   reviews: readonly EvaluationReview[],
+  immutableHistory = false,
 ): EvaluationAggregate {
-  const roundRevision = round.revision ?? gradingRevision(plan);
-  const rubricRevision = round.rubricRevision ?? gradingRevision(plan);
-  const submissionAssignments = assignments.filter((assignment) =>
-    isCountedAssignmentForRound(plan, round, submissionId, assignment),
+  const historicalAssignments = assignments.filter(
+    (assignment) =>
+      assignment.planId === plan.id &&
+      assignment.eventId === plan.eventId &&
+      assignment.roundId === round.id &&
+      assignment.submissionId === submissionId &&
+      isActionableAssignment(assignment),
   );
+  const submissionAssignments = immutableHistory
+    ? historicalAssignments
+    : assignments.filter((assignment) =>
+        isCountedAssignmentForRound(plan, round, submissionId, assignment),
+      );
   const reviewByAssignment = new Map(
     reviews
-      .filter((review) => isReviewForRoundRevision(plan, round, review))
+      .filter((review) => review.planId === plan.id && review.roundId === round.id)
       .map((review) => [review.assignmentId, review]),
   );
-  const submittedReviews = submissionAssignments
-    .map((assignment) => reviewByAssignment.get(assignment.id))
-    .filter(
-      (review): review is EvaluationReview => review !== undefined && review.submittedAt !== null,
-    );
+  const submittedReviews = submissionAssignments.flatMap((assignment) => {
+    const review = reviewByAssignment.get(assignment.id);
+    if (
+      review === undefined ||
+      review.submittedAt === null ||
+      (!immutableHistory
+        ? !isReviewForRoundRevision(plan, round, review)
+        : !isReviewForAssignmentSnapshot(assignment, review))
+    ) {
+      return [];
+    }
+    return [review];
+  });
+  const historicalRoundRevisions = new Set(
+    submissionAssignments.map(
+      (assignment) =>
+        assignment.roundRevision ?? assignment.rubricRevision ?? assignment.planVersion,
+    ),
+  );
+  const historicalRubricRevisions = new Set(
+    submissionAssignments.map((assignment) => assignment.rubricRevision ?? assignment.planVersion),
+  );
+  const roundRevision =
+    immutableHistory && historicalRoundRevisions.size === 1
+      ? ([...historicalRoundRevisions][0] ?? round.revision ?? gradingRevision(plan))
+      : (round.revision ?? gradingRevision(plan));
+  const rubricRevision =
+    immutableHistory && historicalRubricRevisions.size === 1
+      ? ([...historicalRubricRevisions][0] ?? round.rubricRevision ?? gradingRevision(plan))
+      : (round.rubricRevision ?? gradingRevision(plan));
   const totals = submittedReviews.map((review) =>
     calculateRubricTotal(round.rubric, review.scores),
   );
@@ -833,6 +870,67 @@ function effectiveAssignmentsForPlan(
     )
     .map((assignment) => effectiveAssignment(assignment, reviewByAssignment.get(assignment.id)));
 }
+function resolveOrganizerPlanFamily(
+  selectedPlan: EvaluationPlan,
+  plans: readonly EvaluationPlan[],
+): readonly EvaluationPlan[] {
+  const planById = new Map<string, EvaluationPlan>();
+  const childrenByPredecessor = new Map<string, readonly EvaluationPlan[]>();
+  for (const candidate of plans) {
+    if (planById.has(candidate.id)) {
+      throw conflict("Review plan revision lineage is invalid.");
+    }
+    planById.set(candidate.id, candidate);
+    if (candidate.predecessorPlanId != null) {
+      const children = childrenByPredecessor.get(candidate.predecessorPlanId) ?? [];
+      childrenByPredecessor.set(candidate.predecessorPlanId, [...children, candidate]);
+    }
+  }
+
+  const family: EvaluationPlan[] = [];
+  const visited = new Set<string>();
+  let current = selectedPlan;
+  for (let depth = 0; depth <= MAX_REVISION_DEPTH; depth += 1) {
+    if (
+      current.tenantId !== selectedPlan.tenantId ||
+      current.eventId !== selectedPlan.eventId ||
+      visited.has(current.id)
+    ) {
+      throw conflict("Review plan revision lineage is invalid.");
+    }
+    visited.add(current.id);
+    family.unshift(current);
+    if ((childrenByPredecessor.get(current.id)?.length ?? 0) > 1) {
+      throw conflict("Review plan revision lineage must remain linear.");
+    }
+    const predecessorPlanId = current.predecessorPlanId;
+    if (predecessorPlanId == null) return family;
+    const children = childrenByPredecessor.get(predecessorPlanId);
+    if (children === undefined || children.length !== 1) {
+      throw conflict("Review plan revision lineage must remain linear.");
+    }
+    const predecessor = planById.get(predecessorPlanId);
+    if (predecessor === undefined) {
+      throw conflict("Review plan revision lineage is invalid.");
+    }
+    current = predecessor;
+  }
+  throw conflict("Review plan revision depth exceeds the synchronization limit.");
+}
+
+function effectiveAssignmentsForPlanFamily(
+  plans: readonly EvaluationPlan[],
+  assignments: readonly EvaluationAssignment[],
+  reviews: readonly EvaluationReview[],
+): readonly EvaluationAssignment[] {
+  const assignmentById = new Map<string, EvaluationAssignment>();
+  for (const plan of plans) {
+    for (const assignment of effectiveAssignmentsForPlan(plan, assignments, reviews)) {
+      if (!assignmentById.has(assignment.id)) assignmentById.set(assignment.id, assignment);
+    }
+  }
+  return [...assignmentById.values()];
+}
 
 function displayCompletionPercent(completed: number, total: number): number {
   if (total <= 0) return 0;
@@ -859,6 +957,7 @@ function progressForAssignments(
     string,
     {
       reviewerId: string;
+      planId: string;
       roundId: string;
       assigned: number;
       inProgress: number;
@@ -870,9 +969,10 @@ function progressForAssignments(
   >();
   for (const assignment of relevantAssignments) {
     const status = assignment.status;
-    const key = `${assignment.reviewerId}\u0000${assignment.roundId}`;
+    const key = `${assignment.reviewerId}\u0000${assignment.planId}\u0000${assignment.roundId}`;
     const current = reviewerProgress.get(key) ?? {
       reviewerId: assignment.reviewerId,
+      planId: assignment.planId,
       roundId: assignment.roundId,
       assigned: 0,
       inProgress: 0,
@@ -903,6 +1003,7 @@ function progressForAssignments(
     reviewers: [...reviewerProgress.values()].sort(
       (left, right) =>
         left.reviewerId.localeCompare(right.reviewerId) ||
+        left.planId.localeCompare(right.planId) ||
         left.roundId.localeCompare(right.roundId),
     ),
   };
@@ -987,6 +1088,7 @@ function isCountedAssignmentForRound(
   const roundRevision = round.revision ?? gradingRevision(plan);
   const rubricRevision = round.rubricRevision ?? gradingRevision(plan);
   return (
+    assignment.planId === plan.id &&
     assignment.eventId === plan.eventId &&
     assignment.roundId === round.id &&
     assignment.submissionId === submissionId &&
@@ -1005,6 +1107,7 @@ function isReviewForRoundRevision(
   const roundRevision = round.revision ?? gradingRevision(plan);
   const rubricRevision = round.rubricRevision ?? gradingRevision(plan);
   return (
+    review.planId === plan.id &&
     review.roundId === round.id &&
     (review.rubricRevision ?? review.rubricVersion ?? review.planRevision ?? review.planVersion) ===
       rubricRevision &&
@@ -1013,6 +1116,31 @@ function isReviewForRoundRevision(
       review.rubricVersion ??
       review.planRevision ??
       review.planVersion) === roundRevision
+  );
+}
+
+function isReviewForAssignmentSnapshot(
+  assignment: EvaluationAssignment,
+  review: EvaluationReview,
+): boolean {
+  const assignmentRubricRevision = assignment.rubricRevision ?? assignment.planVersion;
+  const assignmentRoundRevision =
+    assignment.roundRevision ?? assignment.rubricRevision ?? assignment.planVersion;
+  const reviewRubricRevision =
+    review.rubricRevision ?? review.rubricVersion ?? review.planRevision ?? review.planVersion;
+  const reviewRoundRevision =
+    review.roundRevision ??
+    review.rubricRevision ??
+    review.rubricVersion ??
+    review.planRevision ??
+    review.planVersion;
+  return (
+    review.planId === assignment.planId &&
+    review.roundId === assignment.roundId &&
+    review.submissionId === assignment.submissionId &&
+    review.assignmentId === assignment.id &&
+    reviewRubricRevision === assignmentRubricRevision &&
+    reviewRoundRevision === assignmentRoundRevision
   );
 }
 
@@ -1323,34 +1451,17 @@ export class EvaluationService {
     if (plan === undefined) {
       throw notFound("No evaluation plan was found for this event.");
     }
+    const planFamily = resolveOrganizerPlanFamily(plan, plans);
+    const familyPlanIds = new Set(planFamily.map((candidate) => candidate.id));
     const [listedSubmissionsResult, batchedWorkspaceRecordsResult] = await hydrationPromise;
     if (listedSubmissionsResult.status === "rejected") {
       throw listedSubmissionsResult.reason;
     }
-    const listedSubmissions = listedSubmissionsResult.value;
-    const batchedWorkspaceRecords =
-      batchedWorkspaceRecordsResult.status === "fulfilled"
-        ? batchedWorkspaceRecordsResult.value
-        : null;
-    let workspaceRecords: OrganizerWorkspaceRecords;
-    if (batchedWorkspaceRecords === null) {
-      const [assignments, reviews] = await Promise.all([
-        this.#repository.listAssignments(actor.tenantId, plan.id),
-        this.#repository.listReviews(actor.tenantId, plan.id),
-      ]);
-      workspaceRecords = { assignments, reviews, decisions: [] };
-    } else {
-      workspaceRecords = batchedWorkspaceRecords;
+    if (batchedWorkspaceRecordsResult.status === "rejected") {
+      throw batchedWorkspaceRecordsResult.reason;
     }
-    const diagnostics =
-      batchedWorkspaceRecords === null
-        ? [
-            {
-              code: "decisions_unavailable" as const,
-              message: "Decision data is temporarily unavailable.",
-            },
-          ]
-        : undefined;
+    const listedSubmissions = listedSubmissionsResult.value;
+    const workspaceRecords = batchedWorkspaceRecordsResult.value;
     const submissions = [
       ...new Map(
         listedSubmissions
@@ -1363,18 +1474,30 @@ export class EvaluationService {
           .map((submission) => [submission.id, submission] as const),
       ).values(),
     ];
-    const assignments = workspaceRecords.assignments.filter(
-      (assignment) =>
-        assignment.tenantId === actor.tenantId &&
-        assignment.eventId === normalizedEventId &&
-        assignment.planId === plan.id,
-    );
-    const reviews = workspaceRecords.reviews.filter(
-      (review) =>
-        review.tenantId === actor.tenantId &&
-        review.eventId === normalizedEventId &&
-        review.planId === plan.id,
-    );
+    const assignments = [
+      ...new Map(
+        workspaceRecords.assignments
+          .filter(
+            (assignment) =>
+              assignment.tenantId === actor.tenantId &&
+              assignment.eventId === normalizedEventId &&
+              familyPlanIds.has(assignment.planId),
+          )
+          .map((assignment) => [assignment.id, assignment] as const),
+      ).values(),
+    ];
+    const reviews = [
+      ...new Map(
+        workspaceRecords.reviews
+          .filter(
+            (review) =>
+              review.tenantId === actor.tenantId &&
+              review.eventId === normalizedEventId &&
+              familyPlanIds.has(review.planId),
+          )
+          .map((review) => [review.id, review] as const),
+      ).values(),
+    ];
     const planDecisions = workspaceRecords.decisions.filter(
       (decision) =>
         decision.tenantId === actor.tenantId &&
@@ -1385,16 +1508,72 @@ export class EvaluationService {
       left.id.localeCompare(right.id),
     );
     const activeSubmissionIdSet = new Set(activeSubmissions.map((submission) => submission.id));
-    const effectiveAssignments = effectiveAssignmentsForPlan(plan, assignments, reviews).filter(
-      (assignment) => activeSubmissionIdSet.has(assignment.submissionId),
+    const effectiveAssignments = effectiveAssignmentsForPlanFamily(
+      planFamily,
+      assignments,
+      reviews,
+    ).filter((assignment) => activeSubmissionIdSet.has(assignment.submissionId));
+    const planById = new Map(planFamily.map((candidate) => [candidate.id, candidate] as const));
+    const resultScopes = planFamily.flatMap((sourcePlan, lineageOrdinal) =>
+      [...sourcePlan.rounds]
+        .sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id))
+        .map((sourceRound) => ({
+          planId: sourcePlan.id,
+          planVersion: sourcePlan.version,
+          lineageOrdinal,
+          planName: sourcePlan.name,
+          roundId: sourceRound.id,
+          roundName: sourceRound.name,
+          sequence: sourceRound.sequence,
+          historical: sourcePlan.id !== plan.id,
+        })),
     );
-    const round = organizerRound(plan, this.#clock());
-    const aggregates =
-      round === undefined
-        ? []
-        : activeSubmissions.map((submission) =>
-            aggregateForSubmission(plan, round, submission.id, assignments, reviews),
-          );
+    const roundByScope = new Map(
+      planFamily.flatMap((sourcePlan) =>
+        sourcePlan.rounds.map(
+          (sourceRound) => [`${sourcePlan.id}\u0000${sourceRound.id}`, sourceRound] as const,
+        ),
+      ),
+    );
+    const aggregateInputs = new Map<
+      string,
+      { plan: EvaluationPlan; round: ReviewRound; submissionId: string }
+    >();
+    const addAggregate = (
+      sourcePlan: EvaluationPlan,
+      sourceRound: ReviewRound,
+      submissionId: string,
+    ) => {
+      aggregateInputs.set(`${sourcePlan.id}\u0000${sourceRound.id}\u0000${submissionId}`, {
+        plan: sourcePlan,
+        round: sourceRound,
+        submissionId,
+      });
+    };
+    for (const assignment of effectiveAssignments) {
+      const sourcePlan = planById.get(assignment.planId);
+      const sourceRound = roundByScope.get(`${assignment.planId}\u0000${assignment.roundId}`);
+      if (sourcePlan !== undefined && sourceRound !== undefined) {
+        addAggregate(sourcePlan, sourceRound, assignment.submissionId);
+      }
+    }
+    const organizerActiveRound = organizerRound(plan, this.#clock());
+    if (organizerActiveRound !== undefined) {
+      for (const activeSubmission of activeSubmissions) {
+        addAggregate(plan, organizerActiveRound, activeSubmission.id);
+      }
+    }
+    const aggregates = [...aggregateInputs.values()].map(
+      ({ plan: sourcePlan, round, submissionId }) =>
+        aggregateForSubmission(
+          sourcePlan,
+          round,
+          submissionId,
+          assignments,
+          reviews,
+          sourcePlan.id !== plan.id,
+        ),
+    );
     const decisions = Object.fromEntries(
       planDecisions
         .filter((decision) => activeSubmissionIdSet.has(decision.submissionId))
@@ -1403,48 +1582,66 @@ export class EvaluationService {
     const effectiveAssignmentById = new Map(
       effectiveAssignments.map((assignment) => [assignment.id, assignment] as const),
     );
-    const roundById = new Map(plan.rounds.map((candidate) => [candidate.id, candidate] as const));
-    const submittedReviews = reviews
-      .flatMap((review): readonly EvaluationOrganizerSubmittedReview[] => {
-        const assignment = effectiveAssignmentById.get(review.assignmentId);
-        const reviewRound = roundById.get(review.roundId);
-        if (
-          review.submittedAt === null ||
-          assignment === undefined ||
-          reviewRound === undefined ||
-          !isCountedAssignmentForRound(plan, reviewRound, review.submissionId, assignment) ||
-          !isReviewForRoundRevision(plan, reviewRound, review)
-        ) {
-          return [];
-        }
-        return [
-          {
-            id: review.id,
-            roundId: review.roundId,
-            submissionId: review.submissionId,
-            reviewerId: review.reviewerId,
-            comment: review.comment,
-            submittedAt: review.submittedAt,
-          },
-        ];
-      })
-      .sort(
-        (left, right) =>
-          left.submissionId.localeCompare(right.submissionId) ||
-          left.roundId.localeCompare(right.roundId) ||
-          left.submittedAt.localeCompare(right.submittedAt) ||
-          left.reviewerId.localeCompare(right.reviewerId),
-      );
+    const submittedReviewByAssignmentId = new Map<string, EvaluationOrganizerSubmittedReview>();
+    const submittedReviewIds = new Set<string>();
+    for (const review of [...reviews].sort(
+      (left, right) =>
+        right.version - left.version ||
+        right.updatedAt.localeCompare(left.updatedAt) ||
+        left.id.localeCompare(right.id),
+    )) {
+      const assignment = effectiveAssignmentById.get(review.assignmentId);
+      const sourcePlan = planById.get(review.planId);
+      const reviewRound = roundByScope.get(`${review.planId}\u0000${review.roundId}`);
+      if (
+        review.submittedAt === null ||
+        assignment === undefined ||
+        sourcePlan === undefined ||
+        reviewRound === undefined ||
+        review.planId !== assignment.planId ||
+        review.roundId !== assignment.roundId ||
+        (sourcePlan.id === plan.id
+          ? !isCountedAssignmentForRound(
+              sourcePlan,
+              reviewRound,
+              review.submissionId,
+              assignment,
+            ) || !isReviewForRoundRevision(sourcePlan, reviewRound, review)
+          : !isReviewForAssignmentSnapshot(assignment, review)) ||
+        submittedReviewIds.has(review.id) ||
+        submittedReviewByAssignmentId.has(review.assignmentId)
+      ) {
+        continue;
+      }
+      submittedReviewIds.add(review.id);
+      submittedReviewByAssignmentId.set(review.assignmentId, {
+        id: review.id,
+        planId: review.planId,
+        roundId: review.roundId,
+        submissionId: review.submissionId,
+        reviewerId: review.reviewerId,
+        comment: review.comment,
+        submittedAt: review.submittedAt,
+      });
+    }
+    const submittedReviews = [...submittedReviewByAssignmentId.values()].sort(
+      (left, right) =>
+        left.submissionId.localeCompare(right.submissionId) ||
+        left.planId.localeCompare(right.planId) ||
+        left.roundId.localeCompare(right.roundId) ||
+        left.submittedAt.localeCompare(right.submittedAt) ||
+        left.reviewerId.localeCompare(right.reviewerId),
+    );
     return {
       event,
       plan,
       submissions,
       assignments: effectiveAssignments,
       progress: progressForAssignments(plan, effectiveAssignments),
+      resultScopes,
       aggregates,
       submittedReviews,
       decisions,
-      ...(diagnostics === undefined ? {} : { diagnostics }),
     };
   }
 
@@ -3642,12 +3839,6 @@ export class EvaluationService {
       },
       assignments: desired,
     };
-  }
-  async #assignmentContext(
-    assignment: EvaluationAssignment,
-  ): Promise<{ plan: EvaluationPlan; round: ReviewRound }> {
-    const plan = await this.#getPlan(assignment.tenantId, assignment.planId);
-    return { plan, round: findRound(plan, assignment.roundId) };
   }
 
   async #submissionRevision(

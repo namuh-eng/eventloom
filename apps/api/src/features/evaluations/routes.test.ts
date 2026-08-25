@@ -960,7 +960,7 @@ describe("evaluation HTTP routes", () => {
     ]);
     expect(body.data.decisions).toEqual({});
   });
-  it("keeps the organizer workspace usable and exposes diagnostics when decisions fail", async () => {
+  it("fails the organizer workspace closed when authoritative decisions cannot be read", async () => {
     const repository = new DecisionReadFailureRepository();
     const app = createTestApp({}, {}, undefined, repository);
     await jsonRequest(app, "/evaluations/plans", "POST", planRequest);
@@ -973,23 +973,8 @@ describe("evaluation HTTP routes", () => {
 
     const response = await app.request("/evaluations/organizer/workspace?eventId=event-1");
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({
-      data: {
-        plan: { id: "plan-1" },
-        submissions: [{ id: "submission-1" }],
-        assignments: [{ planId: "plan-1", submissionId: "submission-1" }],
-        progress: { planId: "plan-1", total: 1 },
-        aggregates: [{ planId: "plan-1", submissionId: "submission-1" }],
-        decisions: {},
-        diagnostics: [
-          {
-            code: "decisions_unavailable",
-            message: "Decision data is temporarily unavailable.",
-          },
-        ],
-      },
-    });
+    expect(response.status).toBe(500);
+    await expect(response.text()).resolves.toBe("Internal Server Error");
     expect(repository.organizerWorkspaceCalls).toBe(1);
   });
 

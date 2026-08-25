@@ -16,12 +16,24 @@ export interface ApiEvaluationEventMetadata {
   readonly endsAt: string;
 }
 
+export interface ApiOrganizerResultScope {
+  readonly planId: string;
+  readonly planVersion: number;
+  readonly lineageOrdinal: number;
+  readonly planName: string;
+  readonly roundId: string;
+  readonly roundName: string;
+  readonly sequence: number;
+  readonly historical: boolean;
+}
+
 export interface ApiOrganizerWorkspaceResponse {
   readonly event: ApiEvaluationEventMetadata;
   readonly plan: ApiPlan;
   readonly submissions: readonly ApiSubmission[];
   readonly assignments: readonly ApiAssignment[];
   readonly progress: ApiProgress;
+  readonly resultScopes: readonly ApiOrganizerResultScope[];
   readonly aggregates: readonly ApiAggregate[];
   readonly submittedReviews: readonly ApiSubmittedReview[];
   readonly decisions: Readonly<Record<string, ApiDecision>>;

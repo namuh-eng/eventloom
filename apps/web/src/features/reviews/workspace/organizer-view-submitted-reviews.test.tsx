@@ -8,6 +8,7 @@ import { OrganizerSubmittedReviews } from "./organizer-view-submitted-reviews";
 const privateReviewerId = "reviewer-secret-42";
 const submittedReview = {
   id: "review-1",
+  planId: "plan-1",
   roundId: "round-1",
   submissionId: "submission-1",
   reviewerId: privateReviewerId,
@@ -43,6 +44,24 @@ describe("OrganizerSubmittedReviews", () => {
     expect(markup).toContain(authorizedReviewer.name);
     expect(markup).toContain(submittedReview.comment);
     expect(markup).not.toContain(privateReviewerId);
+  });
+  it("hides internal scorecard response markers from organizer comments", () => {
+    const markup = renderToStaticMarkup(
+      createElement(OrganizerSubmittedReviews, {
+        reviews: [
+          {
+            ...submittedReview,
+            comment:
+              'Visible recommendation.\\n[scorecard-response id="tooling"]Internal criterion response[/scorecard-response]',
+          },
+        ],
+        reviewerMembers: [authorizedReviewer],
+      }),
+    );
+
+    expect(markup).toContain("Visible recommendation.");
+    expect(markup).not.toContain("scorecard-response");
+    expect(markup).not.toContain("Internal criterion response");
   });
 
   it("uses a private fallback when the member roster is empty or unavailable", () => {

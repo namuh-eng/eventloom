@@ -331,14 +331,26 @@ export interface OrganizerEvaluationWorkspace {
     readonly id: string;
     readonly rounds: readonly { readonly id: string; readonly sequence?: number | undefined }[];
   };
+  readonly resultScopes: readonly {
+    readonly planId: string;
+    readonly planVersion: number;
+    readonly lineageOrdinal: number;
+    readonly planName: string;
+    readonly roundId: string;
+    readonly roundName: string;
+    readonly sequence: number;
+    readonly historical: boolean;
+  }[];
   readonly assignments: readonly {
     readonly id: string;
+    readonly planId: string;
     readonly reviewerId: string;
     readonly submissionId: string;
     readonly roundId: string;
     readonly status: "assigned" | "in_progress" | "submitted" | "abstained";
   }[];
   readonly aggregates: readonly {
+    readonly planId: string;
     readonly roundId: string;
     readonly submissionId: string;
     readonly submittedReviewCount: number;
@@ -352,9 +364,9 @@ export interface OrganizerEvaluationWorkspace {
 export interface OrganizerEvaluationIndex {
   readonly plan: OrganizerEvaluationWorkspace["plan"];
   readonly round: OrganizerEvaluationWorkspace["plan"]["rounds"][number] | undefined;
-  readonly roundBySubmissionId: ReadonlyMap<
+  readonly sourceScopeBySubmissionId: ReadonlyMap<
     string,
-    OrganizerEvaluationWorkspace["plan"]["rounds"][number]
+    OrganizerEvaluationWorkspace["resultScopes"][number]
   >;
   readonly assignmentsBySubmissionId: ReadonlyMap<
     string,
@@ -646,7 +658,7 @@ export function reviewDataStateFromError(reason: unknown): ReviewDataState {
 }
 
 export function reviewDataStateForIndex(index: OrganizerEvaluationIndex): ReviewDataState {
-  return index.round === undefined
+  return index.plan.rounds.length === 0 && index.sourceScopeBySubmissionId.size === 0
     ? {
         status: "no_plan",
         message: "No evaluation plan or review round is configured for this event.",
@@ -669,6 +681,8 @@ export function reviewDataMessage(
 
 interface SubmittedReview {
   readonly assignmentId: string;
+  readonly planId: string;
+  readonly roundId: string;
   readonly submissionId: string;
   readonly comment: string;
   readonly scores: Readonly<Record<string, { readonly value: number | string }>>;
@@ -729,6 +743,24 @@ export async function loadOrganizerEvaluationDecision(
   return decision ?? undefined;
 }
 
+function evaluationScopeKey(planId: string, roundId: string): string {
+  return `${planId}\u0000${roundId}`;
+}
+
+function isLaterResultScope(
+  candidate: OrganizerEvaluationWorkspace["resultScopes"][number],
+  current: OrganizerEvaluationWorkspace["resultScopes"][number],
+): boolean {
+  return (
+    candidate.lineageOrdinal > current.lineageOrdinal ||
+    (candidate.lineageOrdinal === current.lineageOrdinal &&
+      (candidate.sequence > current.sequence ||
+        (candidate.sequence === current.sequence &&
+          (candidate.planId > current.planId ||
+            (candidate.planId === current.planId && candidate.roundId > current.roundId)))))
+  );
+}
+
 export function indexOrganizerEvaluationWorkspace(
   workspace: OrganizerEvaluationWorkspace,
 ): OrganizerEvaluationIndex {
@@ -737,31 +769,42 @@ export function indexOrganizerEvaluationWorkspace(
       (left.sequence ?? 0) - (right.sequence ?? 0) || left.id.localeCompare(right.id),
   );
   const round = rounds[0];
-  const roundsById = new Map(rounds.map((candidate) => [candidate.id, candidate]));
-  const roundBySubmissionId = new Map<
+  const scopeByKey = new Map(
+    workspace.resultScopes.map(
+      (scope) => [evaluationScopeKey(scope.planId, scope.roundId), scope] as const,
+    ),
+  );
+  const sourceScopeBySubmissionId = new Map<
     string,
-    OrganizerEvaluationWorkspace["plan"]["rounds"][number]
+    OrganizerEvaluationWorkspace["resultScopes"][number]
   >();
   for (const assignment of workspace.assignments) {
     if (assignment.status === "abstained") continue;
-    const candidate = roundsById.get(assignment.roundId);
+    const candidate = scopeByKey.get(evaluationScopeKey(assignment.planId, assignment.roundId));
     if (candidate === undefined) continue;
-    const current = roundBySubmissionId.get(assignment.submissionId);
-    if (
-      current === undefined ||
-      (candidate.sequence ?? 0) > (current.sequence ?? 0) ||
-      ((candidate.sequence ?? 0) === (current.sequence ?? 0) && candidate.id > current.id)
-    ) {
-      roundBySubmissionId.set(assignment.submissionId, candidate);
+    const current = sourceScopeBySubmissionId.get(assignment.submissionId);
+    if (current === undefined || isLaterResultScope(candidate, current)) {
+      sourceScopeBySubmissionId.set(assignment.submissionId, candidate);
     }
   }
+  const activeFallbackScope =
+    workspace.resultScopes.find(
+      (scope) => scope.planId === workspace.plan.id && scope.roundId === round?.id,
+    ) ?? workspace.resultScopes.find((scope) => scope.planId === workspace.plan.id);
   const assignmentsBySubmissionId = new Map<
     string,
     OrganizerEvaluationWorkspace["assignments"][number][]
   >();
   for (const assignment of workspace.assignments) {
-    const selectedRound = roundBySubmissionId.get(assignment.submissionId) ?? round;
-    if (selectedRound?.id !== assignment.roundId) continue;
+    const selectedScope =
+      sourceScopeBySubmissionId.get(assignment.submissionId) ?? activeFallbackScope;
+    if (
+      selectedScope === undefined ||
+      evaluationScopeKey(selectedScope.planId, selectedScope.roundId) !==
+        evaluationScopeKey(assignment.planId, assignment.roundId)
+    ) {
+      continue;
+    }
     const current = assignmentsBySubmissionId.get(assignment.submissionId) ?? [];
     current.push(assignment);
     assignmentsBySubmissionId.set(assignment.submissionId, current);
@@ -771,15 +814,20 @@ export function indexOrganizerEvaluationWorkspace(
     OrganizerEvaluationWorkspace["aggregates"][number]
   >();
   for (const aggregate of workspace.aggregates) {
-    const selectedRound = roundBySubmissionId.get(aggregate.submissionId) ?? round;
-    if (aggregate.roundId === selectedRound?.id) {
+    const selectedScope =
+      sourceScopeBySubmissionId.get(aggregate.submissionId) ?? activeFallbackScope;
+    if (
+      selectedScope !== undefined &&
+      evaluationScopeKey(selectedScope.planId, selectedScope.roundId) ===
+        evaluationScopeKey(aggregate.planId, aggregate.roundId)
+    ) {
       aggregateBySubmissionId.set(aggregate.submissionId, aggregate);
     }
   }
   return {
     plan: workspace.plan,
     round,
-    roundBySubmissionId,
+    sourceScopeBySubmissionId,
     assignmentsBySubmissionId,
     aggregateBySubmissionId,
     decisions: workspace.decisions,
@@ -895,15 +943,25 @@ export async function enrichCanonicalSubmission(
   try {
     const workspace = await loadOrganizerEvaluationWorkspace(baseUrl, envelope.submission.eventId);
     const index = indexOrganizerEvaluationWorkspace(workspace);
-    const roundId = index.roundBySubmissionId.get(envelope.submission.id)?.id ?? index.round?.id;
+    const sourceScope =
+      index.sourceScopeBySubmissionId.get(envelope.submission.id) ??
+      workspace.resultScopes.find(
+        (scope) => scope.planId === workspace.plan.id && scope.roundId === index.round?.id,
+      );
     const [submittedReviewResult, reviewerMembers] = await Promise.all([
-      roundId === undefined
+      sourceScope === undefined
         ? Promise.resolve({ reviews: [], error: null })
         : evaluationRequest<{ reviews: readonly SubmittedReview[] }>(
             baseUrl,
-            `/plans/${encodeURIComponent(workspace.plan.id)}/rounds/${encodeURIComponent(roundId)}/submissions/${encodeURIComponent(envelope.submission.id)}/reviews`,
+            `/plans/${encodeURIComponent(sourceScope.planId)}/rounds/${encodeURIComponent(sourceScope.roundId)}/submissions/${encodeURIComponent(envelope.submission.id)}/reviews`,
           )
-            .then(({ reviews }) => ({ reviews, error: null }))
+            .then(({ reviews }) => ({
+              reviews: reviews.filter(
+                (review) =>
+                  review.planId === sourceScope.planId && review.roundId === sourceScope.roundId,
+              ),
+              error: null,
+            }))
             .catch((reason: unknown) => ({
               reviews: [],
               error:

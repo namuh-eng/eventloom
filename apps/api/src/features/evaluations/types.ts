@@ -434,6 +434,7 @@ export interface EvaluationProgress {
 }
 export interface EvaluationReviewerProgress {
   readonly reviewerId: string;
+  readonly planId?: string | undefined;
   readonly roundId?: string | undefined;
   readonly assigned: number;
   readonly inProgress: number;

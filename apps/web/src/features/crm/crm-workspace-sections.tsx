@@ -2433,6 +2433,14 @@ export function CrmWorkspaceOutreachSection({
             : "Preview before queueing"
         }
       >
+        <div className={styles.previewBox} role="note" aria-label="Recipient safeguards">
+          <h3>Recipient safeguards</h3>
+          <p>
+            Preview confirms merge fields, not consent. Active-contact, valid-address, sender
+            exclusion, provider suppression, and unsubscribe rules are rechecked when delivery is
+            queued. Final failures, bounces, and complaints remain visible in the queue results.
+          </p>
+        </div>
         <form className={styles.form} onSubmit={(event) => void previewOutreach(event)}>
           <label className={styles.field}>
             <span>Audience</span>
@@ -2515,7 +2523,7 @@ export function CrmWorkspaceOutreachSection({
             <h3>Outreach preview</h3>
             <p>
               <strong>{outreachPreview.count}</strong> recipient
-              {outreachPreview.count === 1 ? "" : "s"} will be queued for delivery.
+              {outreachPreview.count === 1 ? "" : "s"} selected for queueing.
             </p>
             {outreachPreview.eventId ? <p>Event context: {outreachPreview.eventId}</p> : null}
             {outreachPreview.segmentId ? <p>Segment context: {outreachPreview.segmentId}</p> : null}

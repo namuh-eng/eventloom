@@ -29,7 +29,7 @@ function statement(query: string) {
     async all() {
       return { results: [] };
     },
-    async first() {
+    async first(): Promise<Record<string, unknown> | null> {
       return null;
     },
     async run() {
@@ -39,14 +39,16 @@ function statement(query: string) {
   };
 }
 
-function database(changes = 1) {
+function database(changes = 1, firstResults: readonly (Record<string, unknown> | null)[] = []) {
   const statements: ReturnType<typeof statement>[] = [];
+  const rows = [...firstResults];
   const batch = vi.fn(async (items: readonly ReturnType<typeof statement>[]) =>
     items.map((_item, index) => ({ meta: { changes: index === 0 ? changes : 1 } })),
   );
   return {
     prepare(query: string) {
       const prepared = statement(query);
+      prepared.first = async () => rows.shift() ?? null;
       statements.push(prepared);
       return prepared;
     },
@@ -590,6 +592,91 @@ describe("D1 CRM repository commands", () => {
     expect(participant?.bound.values).toContain(crmContact.email);
     expect(profile?.bound.values).toContain(projection.participantId);
     expect(profile?.bound.values).toContain(crmContact.displayName);
+  });
+  it("rejects a missing pinned CRM participant on first call and replay", async () => {
+    const db = database(1, [null, null, null, null]);
+    const repository = new D1CrmRepository(db);
+    const projection: CrmEventProjection = {
+      id: "event-contact-pinned",
+      organizationId: "org-1",
+      eventId: "event-1",
+      participantId: "participant-pinned",
+      crmContactId: crmContact.id,
+      contactId: crmContact.id,
+      sessionId: null,
+      role: "speaker",
+      note: null,
+      createdBy: "user-1",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await expect(repository.saveProjection(projection, crmContact)).rejects.toThrow(
+      "The pinned participant does not exist.",
+    );
+    await expect(repository.saveProjection(projection, crmContact)).rejects.toThrow(
+      "The pinned participant does not exist.",
+    );
+    expect(db.batch).not.toHaveBeenCalled();
+  });
+
+  it("reuses Marcus's resolved participant for an unpinned CRM projection and replay", async () => {
+    const projection: CrmEventProjection = {
+      id: "event-contact-marcus",
+      organizationId: "org-1",
+      eventId: "event-1",
+      participantId: "crm-participant:event-1:contact-1",
+      crmContactId: crmContact.id,
+      contactId: crmContact.id,
+      sessionId: null,
+      role: "speaker",
+      note: null,
+      createdBy: "user-1",
+      createdAt: now,
+      updatedAt: now,
+    };
+    const canonicalParticipantId = "participant-marcus";
+    const db = database(1, [
+      null,
+      null,
+      { id: canonicalParticipantId },
+      null,
+      {
+        id: projection.id,
+        organization_id: projection.organizationId,
+        event_id: projection.eventId,
+        participant_id: canonicalParticipantId,
+        crm_contact_id: projection.crmContactId,
+        source_crm_contact_id: null,
+        merge_audit_id: null,
+        session_id: projection.sessionId,
+        role: projection.role,
+        note: projection.note,
+        created_by: projection.createdBy,
+        created_at: projection.createdAt,
+        updated_at: projection.updatedAt,
+      },
+    ]);
+    const repository = new D1CrmRepository(db);
+
+    const created = await repository.saveProjection(projection, {
+      ...crmContact,
+      displayName: "Marcus Aurelius",
+      email: "MARCUS@example.com",
+    });
+    const replay = await repository.saveProjection(projection, {
+      ...crmContact,
+      displayName: "Marcus Aurelius",
+      email: "MARCUS@example.com",
+    });
+
+    const emailLookup = db.statements.find((item) =>
+      item.bound.query.includes("normalized_email=? COLLATE NOCASE"),
+    );
+    expect(emailLookup?.bound.values).toEqual(["org-1", "event-1", "marcus@example.com"]);
+    expect(created.participantId).toBe(canonicalParticipantId);
+    expect(replay).toEqual(created);
+    expect(db.batch).toHaveBeenCalledTimes(2);
   });
   it("filters contacts through event participant-link membership", async () => {
     const db = database();

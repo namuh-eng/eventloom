@@ -1,12 +1,12 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { OrganizationMember } from "../../members/api";
+import { useOrganizerAiTriage } from "../organizer-ai-triage";
+import type { ApiOrganizerResultScope } from "./api-api-organizer-workspace-response";
 import type { ApiPlan } from "./api-api-plan";
-
 import type { AggregateRow } from "./organizer-aggregate-row";
 import type { DecisionStatus } from "./organizer-decision-status";
 import { loadRoundAggregates } from "./organizer-load-round-aggregates";
-import { useOrganizerAiTriage } from "../organizer-ai-triage";
 import { mapSeedRoundAggregates } from "./organizer-map-seed-round-aggregates";
 import {
   createOrganizerResultsExportAttemptRunner,
@@ -59,18 +59,44 @@ export function useOrganizerWorkspaceViewController({
       .filter((round) => round.status === "open")
       .sort((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0))[0] ??
     [...seed.rounds].sort((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0))[0];
+  const resultScopes = useMemo(() => {
+    const scopes = seed.resultScopes?.length
+      ? seed.resultScopes
+      : seed.rounds.map((round, index) => ({
+          planId: seed.planId,
+          planVersion: seed.version,
+          lineageOrdinal: 0,
+          planName: seed.planName,
+          roundId: round.id,
+          roundName: round.name,
+          sequence: round.sequence ?? index,
+          historical: false,
+        }));
+    return [
+      ...new Map(
+        scopes.map((scope) => [JSON.stringify([scope.planId, scope.roundId]), scope]),
+      ).values(),
+    ];
+  }, [seed]);
+  const scopeKey = (scope: ApiOrganizerResultScope): string =>
+    JSON.stringify([scope.planId, scope.roundId]);
   const initialRoundId =
     seed.aggregates.find((aggregate) => aggregate.roundId !== undefined)?.roundId ??
     activeRound?.id ??
     seed.rounds[0]?.id ??
     "";
-  const [selectedRoundOverride, setSelectedRoundOverride] = useState<string | null>(null);
-  const selectedRoundCandidate = selectedRoundOverride ?? initialRoundId;
-  const selectedRoundId = seed.rounds.some((round) => round.id === selectedRoundCandidate)
-    ? selectedRoundCandidate
-    : initialRoundId;
+  const initialResultScope =
+    resultScopes.find(
+      (scope) => scope.planId === seed.planId && scope.roundId === initialRoundId,
+    ) ??
+    resultScopes.find((scope) => scope.planId === seed.planId) ??
+    resultScopes[0];
+  const [selectedScopeOverride, setSelectedScopeOverride] = useState<string | null>(null);
+  const selectedResultScope =
+    resultScopes.find((scope) => scopeKey(scope) === selectedScopeOverride) ?? initialResultScope;
+  const selectedRoundId = selectedResultScope?.roundId ?? "";
   const setSelectedRoundId = (value: string): void => {
-    setSelectedRoundOverride(value);
+    setSelectedScopeOverride(value);
   };
   const [roundAggregates, setRoundAggregates] = useState<readonly AggregateRow[]>(seed.aggregates);
   const [aggregateLoading, setAggregateLoading] = useState(false);
@@ -114,12 +140,15 @@ export function useOrganizerWorkspaceViewController({
   const decisionEditorRef = useRef<HTMLDivElement | null>(null);
   const exportAbortControllerRef = useRef<AbortController | null>(null);
   const exportAttemptRunnerRef = useRef(createOrganizerResultsExportAttemptRunner());
-  const selectedRound = seed.rounds.find((round) => round.id === selectedRoundId) ?? activeRound;
+  const isActiveResultScope = selectedResultScope?.planId === seed.planId;
+  const selectedRound = isActiveResultScope
+    ? (seed.rounds.find((round) => round.id === selectedRoundId) ?? activeRound)
+    : undefined;
   const aiTriage = useOrganizerAiTriage({
     baseUrl,
     planId: seed.planId,
     roundId: selectedRoundId,
-    enabled: selectedRound?.aiTriageEnabled === true,
+    enabled: isActiveResultScope && selectedRound?.aiTriageEnabled === true,
   });
   const aiTriageCriterionLabels = Object.fromEntries(
     (selectedRound?.rubric.criteria ?? []).map((criterion) => [criterion.id, criterion.label]),
@@ -131,11 +160,11 @@ export function useOrganizerWorkspaceViewController({
     [],
   );
   useEffect(() => {
-    if (selectedRoundId.length === 0) return;
+    if (selectedResultScope === undefined || selectedRoundId.length === 0) return;
     let cancelled = false;
     setAggregateLoading(true);
     setAggregateError(null);
-    void loadRoundAggregates(baseUrl, seed.planId, selectedRoundId)
+    void loadRoundAggregates(baseUrl, selectedResultScope.planId, selectedRoundId)
       .then((aggregates) => {
         if (!cancelled) {
           setRoundAggregates(mapSeedRoundAggregates(seed, aggregates, selectedRoundId));
@@ -156,7 +185,7 @@ export function useOrganizerWorkspaceViewController({
     return () => {
       cancelled = true;
     };
-  }, [baseUrl, seed, selectedRoundId]);
+  }, [baseUrl, seed, selectedResultScope, selectedRoundId]);
   useEffect(() => {
     if (selectedDecisionId === null) return;
     decisionEditorRef.current?.focus();
@@ -172,9 +201,11 @@ export function useOrganizerWorkspaceViewController({
     selectedDecisionId,
     selectedRound,
     selectedRoundId,
+    resultScopeIsActive: isActiveResultScope,
     reviewerMembers,
   });
   function openReviewersForSubmission(submissionId: string): void {
+    if (!isActiveResultScope) return;
     const aggregate = roundAggregates.find((candidate) => candidate.id === submissionId);
     const roundId = aggregate?.roundId ?? selectedRound?.id ?? selectedRoundId;
     if (roundId.length > 0) setAssignmentTarget({ roundId, submissionId });
@@ -182,9 +213,15 @@ export function useOrganizerWorkspaceViewController({
   }
 
   function openDecisionForSubmission(submissionId: string): void {
+    if (!isActiveResultScope) return;
     const aggregate = roundAggregates.find((candidate) => candidate.id === submissionId);
     const roundId = aggregate?.roundId ?? selectedRound?.id ?? selectedRoundId;
-    if (roundId.length > 0) setSelectedRoundId(roundId);
+    if (roundId.length > 0) {
+      const scope = resultScopes.find(
+        (candidate) => candidate.planId === seed.planId && candidate.roundId === roundId,
+      );
+      if (scope !== undefined) setSelectedRoundId(scopeKey(scope));
+    }
     setDecisionQuery("");
     setDecisionFilter("all");
     setSelectedDecisionId(submissionId);
@@ -195,6 +232,7 @@ export function useOrganizerWorkspaceViewController({
     submissionId: string,
     decision: ReviewPlanSeed["decisionBySubmission"][string],
   ): void {
+    if (!isActiveResultScope) return;
     setDecisionOverrides((current) => ({
       planId: seed.planId,
       decisions: {
@@ -205,7 +243,7 @@ export function useOrganizerWorkspaceViewController({
   }
 
   async function exportResults(): Promise<void> {
-    if (exportAbortControllerRef.current !== null) return;
+    if (!isActiveResultScope || exportAbortControllerRef.current !== null) return;
     const controller = new AbortController();
     exportAbortControllerRef.current = controller;
     setExportCreating(true);
@@ -244,6 +282,10 @@ export function useOrganizerWorkspaceViewController({
     activeRound,
     initialRoundId,
     selectedRoundId,
+    selectedResultScope,
+    selectedResultScopeKey: selectedResultScope === undefined ? "" : scopeKey(selectedResultScope),
+    resultScopes,
+    isActiveResultScope,
     setSelectedRoundId,
     roundAggregates,
     aggregateLoading,

@@ -33,7 +33,8 @@ export async function loadOrganizerData(
     throw reason;
   }
   const plan = normalizeApiPlan(workspace.plan);
-  const assignments = workspace.assignments;
+  const assignments = workspace.assignments.filter((assignment) => assignment.planId === plan.id);
+  const aggregates = workspace.aggregates.filter((aggregate) => aggregate.planId === plan.id);
   const mappedProgress: ApiProgress = {
     ...workspace.progress,
     reviewers: workspace.progress.reviewers ?? deriveReviewerProgress(assignments),
@@ -46,7 +47,7 @@ export async function loadOrganizerData(
         .map((submission) => [submission.id, submission] as const),
     ).values(),
   ];
-  const aggregateRoundId = workspace.aggregates[0]?.roundId;
+  const aggregateRoundId = aggregates[0]?.roundId;
   const round =
     plan.rounds.find((candidate) => candidate.id === aggregateRoundId) ??
     [...plan.rounds]
@@ -64,11 +65,12 @@ export async function loadOrganizerData(
   const aggregateEntries = mapRoundAggregates(
     uniqueSubmissions,
     assignments,
-    workspace.aggregates,
+    aggregates,
     selectedRoundId,
   );
   return {
     ...mapPlan(plan, eventId, aggregateEntries, mappedProgress, workspace.decisions, assignments),
+    resultScopes: workspace.resultScopes,
     submittedReviews: workspace.submittedReviews,
     eventName: workspace.event.name,
     eventTimeZone: workspace.event.timeZone,

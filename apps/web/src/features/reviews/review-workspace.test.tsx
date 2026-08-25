@@ -1579,6 +1579,7 @@ describe("review workspace", () => {
     };
     const aggregates = [
       {
+        planId: plan.id,
         roundId: "round-batch",
         submissionId: "submission-b",
         submittedReviewCount: 2,
@@ -1587,6 +1588,7 @@ describe("review workspace", () => {
         possibleWeightedTotal: 5,
       },
       {
+        planId: plan.id,
         roundId: "round-batch",
         submissionId: "submission-a",
         submittedReviewCount: 1,
@@ -1595,6 +1597,7 @@ describe("review workspace", () => {
         possibleWeightedTotal: 5,
       },
       {
+        planId: plan.id,
         roundId: "round-batch",
         submissionId: "submission-c",
         submittedReviewCount: 0,
@@ -1647,6 +1650,18 @@ describe("review workspace", () => {
             plan,
             submissions,
             assignments,
+            resultScopes: [
+              {
+                planId: plan.id,
+                planVersion: plan.version,
+                planName: plan.name,
+                roundId: "round-batch",
+                roundName: "Batch round",
+                sequence: 1,
+                historical: false,
+              },
+            ],
+            submittedReviews: [],
             progress,
             aggregates,
             decisions,
