@@ -1267,6 +1267,7 @@ describe("CrmService", () => {
     repository.resetReads();
     const created = await crm.addContactToEvent(actor, input);
     expect(created).toMatchObject({ outcome: "created", idempotent: false });
+    expect(created.projection.participantId).toBe(`crm-participant:event-a:${contact.id}`);
     expect(repository.calls).toEqual({
       listContacts: 0,
       listProjections: 0,

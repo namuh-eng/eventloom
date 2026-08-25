@@ -23,23 +23,28 @@ const catalog: AgendaCatalog = {
       id: "session-1",
       title: "Opening",
       status: "accepted",
+      publicApprovalEligible: true,
       participantIds: ["speaker-1"],
       speakerNames: ["Ada Lovelace"],
       resourceIds: ["projector-1"],
       capacityRequired: 120,
+      trackIds: ["track-a"],
     },
     {
       id: "session-2",
       title: "Panel",
       status: "accepted",
+      publicApprovalEligible: true,
       participantIds: ["speaker-2"],
       resourceIds: [],
       capacityRequired: 40,
+      trackIds: ["track-b"],
     },
     {
       id: "session-3",
       title: "Deep dive",
       status: "accepted",
+      publicApprovalEligible: true,
       participantIds: ["speaker-1"],
       resourceIds: ["projector-1"],
       capacityRequired: 30,
@@ -325,6 +330,83 @@ describe("agenda validation", () => {
       message: 'Speaker "Ada Lovelace" has 5 minutes to change rooms; 15 required',
     });
   });
+  it("blocks initial publication of a scheduled unapproved session", async () => {
+    const engine = createEngine();
+    await engine.createAgenda({
+      eventId: "event-1",
+      minimumTravelMinutes: 15,
+      actorId: "organizer-1",
+      ...catalog,
+      sessions: catalog.sessions.map((session) =>
+        session.id === "session-2" ? { ...session, publicApprovalEligible: false } : session,
+      ),
+    });
+    const draft = await engine.updateDraft({
+      eventId: "event-1",
+      expectedVersion: 1,
+      actorId: "organizer-1",
+      entries: [
+        entry("entry-2", "session-2", "room-small", "2026-08-10T10:00", "2026-08-10T11:00"),
+      ],
+    });
+    await engine.validate({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      actorId: "organizer-1",
+    });
+
+    await expect(
+      engine.publish({
+        eventId: "event-1",
+        expectedVersion: draft.version,
+        actorId: "organizer-1",
+      }),
+    ).rejects.toMatchObject({
+      code: "PUBLICATION_BLOCKED",
+      message: "Only approval-eligible sessions can be published: session-2",
+    });
+  });
+  it("fails closed when a scheduled session omits approval eligibility", async () => {
+    const engine = createEngine();
+    const missingEligibilityCatalog = {
+      ...catalog,
+      sessions: catalog.sessions.map((session) => {
+        if (session.id !== "session-2") return session;
+        const { publicApprovalEligible: _publicApprovalEligible, ...withoutEligibility } = session;
+        return withoutEligibility;
+      }),
+    } as unknown as AgendaCatalog;
+    await engine.createAgenda({
+      eventId: "event-1",
+      minimumTravelMinutes: 15,
+      actorId: "organizer-1",
+      ...missingEligibilityCatalog,
+    });
+    const draft = await engine.updateDraft({
+      eventId: "event-1",
+      expectedVersion: 1,
+      actorId: "organizer-1",
+      entries: [
+        entry("entry-2", "session-2", "room-small", "2026-08-10T10:00", "2026-08-10T11:00"),
+      ],
+    });
+    await engine.validate({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      actorId: "organizer-1",
+    });
+
+    await expect(
+      engine.publish({
+        eventId: "event-1",
+        expectedVersion: draft.version,
+        actorId: "organizer-1",
+      }),
+    ).rejects.toMatchObject({
+      code: "PUBLICATION_BLOCKED",
+      message: "Only approval-eligible sessions can be published: session-2",
+    });
+  });
   it("requires reasoned warning overrides before atomic publication", async () => {
     const engine = createEngine();
     await initialize(engine);
@@ -600,9 +682,21 @@ describe("agenda concurrency and revisions", () => {
       expectedVersion: secondDraft.version,
       actorId: "organizer-1",
     });
-    const rollback = await engine.rollback({
+    const metadataDraft = await engine.updateCatalog({
       eventId: "event-1",
       expectedVersion: secondDraft.version,
+      minimumTravelMinutes: 15,
+      actorId: "organizer-1",
+      ...{
+        ...catalog,
+        sessions: catalog.sessions.map((session) =>
+          session.id === "session-2" ? { ...session, title: "Current replacement title" } : session,
+        ),
+      },
+    });
+    const rollback = await engine.rollback({
+      eventId: "event-1",
+      expectedVersion: metadataDraft.version,
       revisionId: first.id,
       actorId: "organizer-1",
     });
@@ -661,6 +755,7 @@ describe("agenda concurrency and revisions", () => {
           summary: "Approved abstract",
           format: "Keynote",
           speakerNames: ["Ada Lovelace"],
+          durationMinutes: 40,
         },
       ],
       rooms: catalog.rooms.map((room) =>
@@ -677,6 +772,18 @@ describe("agenda concurrency and revisions", () => {
       actorId: "organizer-1",
       ...approvedCatalog,
     });
+    expect(synchronizedDraft.entries[0]?.metadata).toMatchObject({
+      title: "Opening refreshed",
+      summary: "Approved abstract",
+      format: "Keynote",
+      roomName: "Grand hall",
+      trackNames: ["Main stage"],
+    });
+    expect(synchronizedDraft.entries[0]?.endsAtLocal).toBe("2026-08-10T12:40");
+    expect(
+      Date.parse(synchronizedDraft.entries[0]?.endsAt ?? "") -
+        Date.parse(synchronizedDraft.entries[0]?.startsAt ?? ""),
+    ).toBe(40 * 60_000);
 
     const refreshed = await engine.refreshPublishedContent({
       eventId: "event-1",
@@ -697,6 +804,11 @@ describe("agenda concurrency and revisions", () => {
       roomName: "Grand hall",
       trackNames: ["Main stage"],
     });
+    expect(refreshed.revision?.entries[0]?.endsAtLocal).toBe("2026-08-10T09:40");
+    expect(
+      Date.parse(refreshed.revision?.entries[0]?.endsAt ?? "") -
+        Date.parse(refreshed.revision?.entries[0]?.startsAt ?? ""),
+    ).toBe(40 * 60_000);
     expect(refreshed.revision?.entries[1]?.metadata?.title).toBe(first.entries[1]?.metadata?.title);
     expect(await engine.getOutbox("event-1")).toHaveLength(6);
 
@@ -733,6 +845,13 @@ describe("agenda concurrency and revisions", () => {
     expect(schedulePublication.revisionNumber).toBe(3);
     expect(schedulePublication.entries[0]?.roomId).toBe("room-large");
     expect(schedulePublication.entries[0]?.startsAt).not.toBe(first.entries[0]?.startsAt);
+    expect(schedulePublication.entries[0]?.metadata).toMatchObject({
+      title: "Opening refreshed",
+      summary: "Approved abstract",
+      format: "Keynote",
+      roomName: "Grand hall",
+      trackNames: ["Main stage"],
+    });
 
     const revertedCatalog: AgendaCatalog = {
       ...approvedCatalog,
@@ -758,6 +877,214 @@ describe("agenda concurrency and revisions", () => {
     expect(corrective.revision?.entries[0]?.metadata?.title).toBe("Opening");
   });
 
+  it("retains published metadata when a scheduled session becomes unapproved", async () => {
+    const engine = createEngine();
+    await initialize(engine);
+    const draft = await engine.updateDraft({
+      eventId: "event-1",
+      expectedVersion: 1,
+      actorId: "organizer-1",
+      entries: [
+        entry("entry-2", "session-2", "room-small", "2026-08-10T10:00", "2026-08-10T11:00"),
+      ],
+    });
+    await engine.validate({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      actorId: "organizer-1",
+    });
+    const published = await engine.publish({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      actorId: "organizer-1",
+    });
+
+    const unapprovedCatalog: AgendaCatalog = {
+      ...catalog,
+      sessions: catalog.sessions.map((session) =>
+        session.id === "session-2"
+          ? {
+              ...session,
+              title: "Unapproved replacement title",
+              summary: "Unapproved replacement summary",
+              trackIds: ["track-a"],
+              publicApprovalEligible: false,
+            }
+          : session,
+      ),
+    };
+    const synchronized = await engine.updateCatalog({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      minimumTravelMinutes: 15,
+      actorId: "organizer-1",
+      ...unapprovedCatalog,
+    });
+    const refreshed = await engine.refreshPublishedContent({
+      eventId: "event-1",
+      actorId: "organizer-1",
+      expectedCatalogVersion: synchronized.version,
+      catalog: unapprovedCatalog,
+    });
+
+    expect(refreshed).toMatchObject({
+      status: "unchanged",
+      revision: { id: published.id, revisionNumber: 1 },
+    });
+    expect(refreshed.revision?.entries[0]?.metadata?.title).toBe(
+      published.entries[0]?.metadata?.title,
+    );
+    expect(refreshed.revision?.entries[0]?.trackIds).toEqual(published.entries[0]?.trackIds);
+    await expect(engine.getPublishedAgenda("event-1")).resolves.toMatchObject({
+      revisionNumber: 1,
+      entries: [
+        expect.objectContaining({
+          metadata: expect.objectContaining({ title: published.entries[0]?.metadata?.title }),
+        }),
+      ],
+    });
+  });
+  it("replaces and removes scheduled tracks only from approved catalog content", async () => {
+    const engine = createEngine();
+    await initialize(engine);
+    const draft = await engine.updateDraft({
+      eventId: "event-1",
+      expectedVersion: 1,
+      actorId: "organizer-1",
+      entries: [
+        entry("entry-1", "session-1", "room-large", "2026-08-10T09:00", "2026-08-10T10:00", [
+          "track-a",
+        ]),
+      ],
+    });
+    await engine.validate({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      actorId: "organizer-1",
+    });
+    await engine.publish({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      actorId: "organizer-1",
+    });
+    const replacementCatalog: AgendaCatalog = {
+      ...catalog,
+      sessions: catalog.sessions.map((session) =>
+        session.id === "session-1" ? { ...session, trackIds: ["track-b"] } : session,
+      ),
+    };
+    const replacedDraft = await engine.updateCatalog({
+      eventId: "event-1",
+      expectedVersion: draft.version,
+      minimumTravelMinutes: 15,
+      actorId: "organizer-1",
+      ...replacementCatalog,
+    });
+    expect(replacedDraft.entries[0]).toMatchObject({
+      trackIds: ["track-b"],
+      metadata: { trackNames: ["Track B"] },
+    });
+    const replaced = await engine.refreshPublishedContent({
+      eventId: "event-1",
+      actorId: "organizer-1",
+      expectedCatalogVersion: replacedDraft.version,
+      catalog: replacementCatalog,
+    });
+    expect(replaced.revision?.entries[0]).toMatchObject({
+      trackIds: ["track-b"],
+      metadata: { trackNames: ["Track B"] },
+    });
+
+    const removalCatalog: AgendaCatalog = {
+      ...replacementCatalog,
+      sessions: replacementCatalog.sessions.map((session) =>
+        session.id === "session-1" ? { ...session, trackIds: [] } : session,
+      ),
+    };
+    const removedDraft = await engine.updateCatalog({
+      eventId: "event-1",
+      expectedVersion: replacedDraft.version,
+      minimumTravelMinutes: 15,
+      actorId: "organizer-1",
+      ...removalCatalog,
+    });
+    expect(removedDraft.entries[0]).toMatchObject({
+      trackIds: [],
+      metadata: { trackNames: [] },
+    });
+  });
+  it("refreshes approved durations across DST transitions", async () => {
+    const refresh = async (
+      startsAtLocal: string,
+      endsAtLocal: string,
+      startDisambiguation: "earlier" | "later" | undefined,
+      durationMinutes: number,
+    ) => {
+      const engine = createEngine();
+      await initialize(engine);
+      const draft = await engine.updateDraft({
+        eventId: "event-1",
+        expectedVersion: 1,
+        actorId: "organizer-1",
+        entries: [
+          {
+            ...entry("entry-1", "session-1", "room-large", startsAtLocal, endsAtLocal, ["track-a"]),
+            ...(startDisambiguation === undefined ? {} : { startDisambiguation }),
+          },
+        ],
+      });
+      await engine.validate({
+        eventId: "event-1",
+        expectedVersion: draft.version,
+        actorId: "organizer-1",
+      });
+      await engine.publish({
+        eventId: "event-1",
+        expectedVersion: draft.version,
+        actorId: "organizer-1",
+      });
+      const refreshedCatalog: AgendaCatalog = {
+        ...catalog,
+        sessions: catalog.sessions.map((session) =>
+          session.id === "session-1" ? { ...session, durationMinutes } : session,
+        ),
+      };
+      const synchronized = await engine.updateCatalog({
+        eventId: "event-1",
+        expectedVersion: draft.version,
+        minimumTravelMinutes: 15,
+        actorId: "organizer-1",
+        ...refreshedCatalog,
+      });
+      const refreshed = await engine.refreshPublishedContent({
+        eventId: "event-1",
+        actorId: "organizer-1",
+        expectedCatalogVersion: synchronized.version,
+        catalog: refreshedCatalog,
+      });
+      return refreshed.revision?.entries[0];
+    };
+
+    await expect(
+      refresh("2026-03-08T01:30", "2026-03-08T03:00", undefined, 90),
+    ).resolves.toMatchObject({
+      endsAt: "2026-03-08T11:00:00.000Z",
+      endsAtLocal: "2026-03-08T04:00",
+    });
+    await expect(
+      refresh("2026-11-01T01:30", "2026-11-01T02:00", "earlier", 60),
+    ).resolves.toMatchObject({
+      endsAt: "2026-11-01T09:30:00.000Z",
+      endsAtLocal: "2026-11-01T01:30",
+      endDisambiguation: "later",
+    });
+    await expect(
+      refresh("2026-11-01T01:30", "2026-11-01T02:00", "later", 60),
+    ).resolves.toMatchObject({
+      endsAt: "2026-11-01T10:30:00.000Z",
+      endsAtLocal: "2026-11-01T02:30",
+    });
+  });
   it("keeps approved-content handoffs inside the event mutation lock", async () => {
     let lockHeld = false;
     const mutationLock: AgendaMutationLock = {

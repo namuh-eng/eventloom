@@ -3,6 +3,7 @@ import { CrmRepositoryConflictError } from "../../../features/crm/service";
 import type {
   CrmContact,
   CrmContactTransitionAudit,
+  CrmEventProjection,
   CrmPipelineEntry,
 } from "../../../features/crm/types";
 import type { Event, EventAuditEntry } from "../../../features/events/types";
@@ -560,6 +561,36 @@ describe("D1 CRM repository commands", () => {
     }
   });
 
+  it("materializes CRM event links in the canonical speaker roster", async () => {
+    const db = database();
+    const projection: CrmEventProjection = {
+      id: "event-contact-1",
+      organizationId: "org-1",
+      eventId: "event-1",
+      participantId: "crm-participant:event-1:contact-1",
+      crmContactId: crmContact.id,
+      contactId: crmContact.id,
+      sessionId: null,
+      role: "speaker",
+      note: null,
+      createdBy: "user-1",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await new D1CrmRepository(db).saveProjection(projection, crmContact);
+
+    const participant = db.statements.find((item) =>
+      item.bound.query.includes("INSERT OR IGNORE INTO participants"),
+    );
+    const profile = db.statements.find((item) =>
+      item.bound.query.includes("INSERT OR IGNORE INTO speaker_profiles"),
+    );
+    expect(participant?.bound.values).toContain(projection.participantId);
+    expect(participant?.bound.values).toContain(crmContact.email);
+    expect(profile?.bound.values).toContain(projection.participantId);
+    expect(profile?.bound.values).toContain(crmContact.displayName);
+  });
   it("filters contacts through event participant-link membership", async () => {
     const db = database();
     await new D1CrmRepository(db).listContacts("org-1", { eventId: "event-1" });

@@ -103,6 +103,19 @@ function suggestionRunPersistenceChanged(
 function sameStringArray(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
+
+function agendaEntryMetadataEqual(left: AgendaEntry, right: AgendaEntry): boolean {
+  const leftMetadata = left.metadata;
+  const rightMetadata = right.metadata;
+  return (
+    (leftMetadata?.title ?? "") === (rightMetadata?.title ?? "") &&
+    (leftMetadata?.summary ?? "") === (rightMetadata?.summary ?? "") &&
+    (leftMetadata?.format ?? "") === (rightMetadata?.format ?? "") &&
+    sameStringArray(leftMetadata?.speakerNames ?? [], rightMetadata?.speakerNames ?? []) &&
+    (leftMetadata?.roomName ?? "") === (rightMetadata?.roomName ?? "") &&
+    sameStringArray(leftMetadata?.trackNames ?? [], rightMetadata?.trackNames ?? [])
+  );
+}
 function agendaEntriesEqualForPersistence(left: AgendaEntry, right: AgendaEntry): boolean {
   return (
     left.id === right.id &&
@@ -113,7 +126,8 @@ function agendaEntriesEqualForPersistence(left: AgendaEntry, right: AgendaEntry)
     left.startsAtLocal === right.startsAtLocal &&
     left.endsAtLocal === right.endsAtLocal &&
     left.timeZone === right.timeZone &&
-    sameStringArray(left.trackIds, right.trackIds)
+    sameStringArray(left.trackIds, right.trackIds) &&
+    agendaEntryMetadataEqual(left, right)
   );
 }
 
@@ -279,7 +293,8 @@ export class D1AgendaRepository implements AgendaRepository {
         .prepare(`SELECT s.*, COALESCE((SELECT json_group_array(speaker_id) FROM session_speakers x WHERE x.organization_id=s.organization_id AND x.event_id=s.event_id AND x.session_id=s.id),'[]') participant_ids_json,
         COALESCE((SELECT json_group_array(resource_id) FROM session_resources x WHERE x.organization_id=s.organization_id AND x.event_id=s.event_id AND x.session_id=s.id),'[]') resource_ids_json,
         COALESCE((SELECT json_group_array(CASE WHEN NULLIF(TRIM(display_name),'') IS NULL OR TRIM(display_name)=speaker_id THEN 'Speaker' ELSE display_name END) FROM session_speakers x WHERE x.organization_id=s.organization_id AND x.event_id=s.event_id AND x.session_id=s.id),'[]') speaker_names_json,
-        COALESCE((SELECT json_group_array(track_id) FROM session_tracks x WHERE x.organization_id=s.organization_id AND x.event_id=s.event_id AND x.session_id=s.id ORDER BY ordinal),'[]') track_ids_json
+        COALESCE((SELECT json_group_array(track_id) FROM session_tracks x WHERE x.organization_id=s.organization_id AND x.event_id=s.event_id AND x.session_id=s.id ORDER BY ordinal),'[]') track_ids_json,
+        COALESCE((SELECT name FROM formats x WHERE x.organization_id=s.organization_id AND x.event_id=s.event_id AND x.id=s.format_id),'') format_name
         FROM sessions s WHERE organization_id=? AND event_id=? AND deleted_at IS NULL ORDER BY id`)
         .bind(this.organizationId, eventId)
         .all<Row>(),
@@ -412,12 +427,13 @@ export class D1AgendaRepository implements AgendaRepository {
         id: text(row.id),
         title: text(row.title),
         status: text(row.status),
+        publicApprovalEligible: row.content_status === "Approved",
         participantIds: parse(row.participant_ids_json),
         resourceIds: parse(row.resource_ids_json),
         capacityRequired: number(row.capacity_required),
         durationMinutes: number(row.duration_minutes),
         summary: text(row.description),
-        format: "",
+        format: row.format_name == null ? "" : text(row.format_name),
         speakerNames: parse(row.speaker_names_json),
         trackIds: parse(row.track_ids_json),
       })),

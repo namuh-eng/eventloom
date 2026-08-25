@@ -125,7 +125,7 @@ describe("local speaker portal demo adapter", () => {
         kind: "headshot",
         file: new File(["demo image"], "ada.png", { type: "image/png" }),
       }),
-    ).resolves.toEqual({ assetId: "demo-asset-demo-task-headshot-headshot" });
+    ).resolves.toMatchObject({ id: "demo-asset-demo-task-headshot-headshot" });
     await api.transitionTask({
       eventId,
       taskId: headshot.id,

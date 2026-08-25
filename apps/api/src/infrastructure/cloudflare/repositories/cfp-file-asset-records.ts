@@ -83,7 +83,7 @@ export function cfpFileAssetBinding(
     capabilityId: asset.id,
     tenantId: asset.organization_id,
     eventId: asset.event_id,
-    submissionId: asset.submission_id,
+    subject: { kind: "cfp_submission", submissionId: asset.submission_id },
     participantId: asset.participant_id ?? SUBMISSION_CAPABILITY_PARTICIPANT,
     objectKey: asset.object_key,
     fileName: asset.file_name,

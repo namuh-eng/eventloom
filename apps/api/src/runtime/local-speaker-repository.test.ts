@@ -28,7 +28,7 @@ describe("LocalSpeakerRepository review atomicity", () => {
     const task: SpeakerTask = {
       id: "local-review-task",
       eventId,
-      submissionId: null,
+      subject: { type: "participant", participantId },
       participantId,
       type: "upload",
       owner: "speaker",

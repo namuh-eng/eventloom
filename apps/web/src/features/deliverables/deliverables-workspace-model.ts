@@ -192,7 +192,8 @@ export function filterContentRequestRows(
       (query.length === 0 || searchable.includes(query)) &&
       (filters.speakerId === "all" || row.task.participantId === filters.speakerId) &&
       (filters.sessionId === "all" ||
-        (row.task.submissionId ?? "participant") === filters.sessionId) &&
+        (row.task.subject.type === "session" ? row.task.subject.sessionId : "participant") ===
+          filters.sessionId) &&
       (filters.taskId === "all" || row.task.id === filters.taskId) &&
       statusMatches(row.status, filters.status)
     );

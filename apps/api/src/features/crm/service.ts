@@ -2061,8 +2061,11 @@ export class CrmService {
   ): Promise<CrmEventProjectionResult> {
     const organizationId = identifier(input.organizationId, "organizationId");
     const crmContactId = identifier(input.crmContactId ?? input.contactId, "crmContactId");
-    const participantId = identifier(input.participantId ?? crmContactId, "participantId");
     const eventId = identifier(input.eventId, "eventId");
+    const participantId = identifier(
+      input.participantId ?? `crm-participant:${eventId}:${crmContactId}`,
+      "participantId",
+    );
     const key = text(input.idempotencyKey, "idempotencyKey", 512);
     const role = eventRole(input.role);
     const sessionId =

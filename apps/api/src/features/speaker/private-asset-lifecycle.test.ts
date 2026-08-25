@@ -60,13 +60,13 @@ class LifecycleRepository implements SpeakerRepository {
   readonly tasks: SpeakerTask[] = [
     {
       id: "upload-task",
+      tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
       participantId: "participant-1",
       subject: {
         type: "session",
         participantId: "participant-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
       },
       type: "upload",
       owner: "speaker",
@@ -363,7 +363,10 @@ class LifecycleRepository implements SpeakerRepository {
     if (command.toStatus === "submitted") delete task.replacementBaselineAssetId;
     task.version += 1;
     this.taskTransitions.push(command.transition);
-    return Promise.resolve({ ok: true, value: { task, transition: command.transition } });
+    return Promise.resolve({
+      ok: true,
+      value: { task, transition: command.transition },
+    });
   }
   createPendingAsset(asset: SpeakerAsset): Promise<SpeakerAsset> {
     this.assets.push(asset);
@@ -591,7 +594,12 @@ class CapabilityGateway implements PrivateAssetGateway {
   readonly objects = new Map<string, { body: Uint8Array; contentType: string }>();
 
   createUploadGrant(): Promise<PrivateUploadGrant> {
-    return Promise.resolve({ method: "PUT", url: "/legacy", headers: {}, expiresAt: now });
+    return Promise.resolve({
+      method: "PUT",
+      url: "/legacy",
+      headers: {},
+      expiresAt: now,
+    });
   }
   createDownloadGrant(): Promise<PrivateDownloadGrant> {
     return Promise.resolve({ url: "/legacy", expiresAt: now });
@@ -646,7 +654,11 @@ class CapabilityGateway implements PrivateAssetGateway {
     });
   }
   consumeUploadCapability(): Promise<PrivateUploadReceipt> {
-    return Promise.resolve({ contentType: "application/pdf", sizeBytes: 1, uploadedAt: now });
+    return Promise.resolve({
+      contentType: "application/pdf",
+      sizeBytes: 1,
+      uploadedAt: now,
+    });
   }
   consumeDownloadCapability(): Promise<PrivateDownloadObject> {
     return Promise.resolve({
@@ -665,7 +677,7 @@ function binding(
     capabilityId: "asset-1",
     tenantId: "tenant-1",
     eventId: "event-1",
-    submissionId: "submission-1",
+    subject: { kind: "participant" },
     participantId: "participant-1",
     objectKey: "events/event-1/participants/participant-1/slides/asset-1",
     contentType: "application/pdf",
@@ -726,7 +738,10 @@ class MemoryBucket {
     const object = this.objects.get(key);
     return object === undefined
       ? null
-      : { size: object.body.byteLength, httpMetadata: { contentType: object.contentType } };
+      : {
+          size: object.body.byteLength,
+          httpMetadata: { contentType: object.contentType },
+        };
   }
   async get(key: string) {
     const object = this.objects.get(key);
@@ -744,12 +759,34 @@ class MemoryBucket {
   }
 }
 
+function createTestSessionAuthority(
+  overrides: Partial<{
+    tenantId: string;
+    eventId: string;
+    status: string;
+    speakerIds: readonly string[];
+  }> = {},
+) {
+  return {
+    getSession: async (organizationId: string, eventId: string, sessionId: string) =>
+      ({
+        id: sessionId,
+        tenantId: overrides.tenantId ?? organizationId,
+        eventId: overrides.eventId ?? eventId,
+        status: overrides.status ?? (sessionId.includes("declined") ? "declined" : "accepted"),
+        title: "Session",
+        speakerIds: overrides.speakerIds ?? ["participant-1", "participant-2"],
+      }) as never,
+  };
+}
+const acceptedTestSessionAuthority = createTestSessionAuthority();
 describe("private speaker asset lifecycle", () => {
   it("registers an opaque upload, validates transfer, rejects replay, and finalizes ready assets", async () => {
     const repository = new LifecycleRepository();
     const gateway = new CapabilityGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => "asset-1",
     });
@@ -757,6 +794,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "slides.pdf",
@@ -766,7 +804,7 @@ describe("private speaker asset lifecycle", () => {
     expect(authorization.grant.url).toContain("opaque-token");
     expect(authorization.asset).toMatchObject({
       tenantId: "tenant-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       uploaderAccountId: "account-1",
       uploaderLabel: "Alex Rivera",
       version: 1,
@@ -777,7 +815,7 @@ describe("private speaker asset lifecycle", () => {
     expect(gateway.uploadBindings[0]).toMatchObject({
       tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      subject: { kind: "speaker_session", sessionId: "speaker-submission:submission-1" },
       participantId: "participant-1",
       taskId: "upload-task",
       contentType: "application/pdf",
@@ -810,6 +848,7 @@ describe("private speaker asset lifecycle", () => {
       new CapabilityGateway(),
       {
         speakerSender,
+        sessionAuthority: acceptedTestSessionAuthority,
         now: () => new Date(now),
         generateId: () => "organizer-headshot",
       },
@@ -837,6 +876,7 @@ describe("private speaker asset lifecycle", () => {
     const gateway = new CapabilityGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => "asset-retry",
     });
@@ -844,6 +884,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "slides.pdf",
@@ -879,6 +920,7 @@ describe("private speaker asset lifecycle", () => {
     const gateway = new CapabilityGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => "asset-pending-retry",
     });
@@ -886,6 +928,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "slides.pdf",
@@ -917,6 +960,7 @@ describe("private speaker asset lifecycle", () => {
     missingInspection.inspectObject = undefined;
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => "asset-no-inspect",
     });
@@ -924,6 +968,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "slides.pdf",
@@ -947,6 +992,7 @@ describe("private speaker asset lifecycle", () => {
     const gateway = new CapabilityGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => "asset-1",
     });
@@ -967,6 +1013,7 @@ describe("private speaker asset lifecycle", () => {
         eventId: "event-1",
         accountId: "account-2",
         participantId: "participant-1",
+        sessionId: "speaker-submission:submission-1",
         kind: "slides",
         fileName: "slides.pdf",
         contentType: "application/pdf",
@@ -981,6 +1028,7 @@ describe("private speaker asset lifecycle", () => {
     const ids = ["asset-1", "asset-2"];
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => ids.shift() ?? "asset-3",
     });
@@ -988,6 +1036,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       fileName: "slides.pdf",
       contentType: "application/pdf",
@@ -1004,6 +1053,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       supersedesAssetId: first.asset.id,
       expectedLatestVersion: 1,
       idempotencyKey: "immutable-lineage-replacement",
@@ -1036,6 +1086,7 @@ describe("private speaker asset lifecycle", () => {
     const ids = ["asset-v1", "asset-v2-a", "asset-v2-b", "asset-v2-replay", "asset-v2-mismatch"];
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => ids.shift() ?? "unexpected-asset",
     });
@@ -1043,6 +1094,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       fileName: "slides.pdf",
       contentType: "application/pdf",
@@ -1061,6 +1113,7 @@ describe("private speaker asset lifecycle", () => {
         eventId: "event-1",
         accountId: "account-1",
         participantId: "participant-1",
+        sessionId: "speaker-submission:submission-1",
         kind: "slides",
         fileName: "slides-v2-a.pdf",
         contentType: "application/pdf",
@@ -1073,6 +1126,7 @@ describe("private speaker asset lifecycle", () => {
         eventId: "event-1",
         accountId: "account-1",
         participantId: "participant-1",
+        sessionId: "speaker-submission:submission-1",
         kind: "slides",
         fileName: "slides-v2-b.pdf",
         contentType: "application/pdf",
@@ -1086,7 +1140,10 @@ describe("private speaker asset lifecycle", () => {
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.status === "rejected")).toEqual([
       expect.objectContaining({
-        reason: expect.objectContaining({ code: "VERSION_CONFLICT", status: 409 }),
+        reason: expect.objectContaining({
+          code: "VERSION_CONFLICT",
+          status: 409,
+        }),
       }),
     ]);
     expect(repository.assets.filter((asset) => asset.version === 2)).toHaveLength(1);
@@ -1108,6 +1165,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       fileName: winningRequest.fileName,
       contentType: "application/pdf",
@@ -1122,6 +1180,7 @@ describe("private speaker asset lifecycle", () => {
         eventId: "event-1",
         accountId: "account-1",
         participantId: "participant-1",
+        sessionId: "speaker-submission:submission-1",
         kind: "slides",
         fileName: "changed-on-replay.pdf",
         contentType: "application/pdf",
@@ -1143,6 +1202,7 @@ describe("private speaker asset lifecycle", () => {
     const ids = ["first-upload", "first-transition"];
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => ids.shift() ?? "generated-id",
     });
@@ -1150,6 +1210,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: uploadTask.id,
       kind: "slides",
       fileName: "slides.pdf",
@@ -1191,6 +1252,7 @@ describe("private speaker asset lifecycle", () => {
     const ids = ["review-upload", "submit-transition", "review-audit", "changes-transition"];
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => ids.shift() ?? "generated-id",
     });
@@ -1198,6 +1260,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: uploadTask.id,
       kind: "slides",
       fileName: "slides.pdf",
@@ -1263,6 +1326,7 @@ describe("private speaker asset lifecycle", () => {
     const gateway = new CapabilityGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => "linked-state-id",
     });
@@ -1270,6 +1334,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: uploadTask.id,
       kind: "slides",
       fileName: "linked-state.pdf",
@@ -1333,7 +1398,7 @@ describe("private speaker asset lifecycle", () => {
       id: "asset-review-conflict",
       tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       taskId: uploadTask.id,
       kind: "slides",
@@ -1354,6 +1419,7 @@ describe("private speaker asset lifecycle", () => {
       new CapabilityGateway(),
       {
         speakerSender,
+        sessionAuthority: acceptedTestSessionAuthority,
         now: () => new Date(now),
         generateId: () => "review-conflict-id",
       },
@@ -1382,6 +1448,7 @@ describe("private speaker asset lifecycle", () => {
     const ids = ["task-asset-1", "task-transition-1", "task-asset-2", "task-transition-2"];
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => ids.shift() ?? "generated-id",
     });
@@ -1389,6 +1456,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "slides.pdf",
@@ -1414,6 +1482,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "slides-v2.pdf",
@@ -1467,6 +1536,7 @@ describe("private speaker asset lifecycle", () => {
     let idCounter = 0;
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => `baseline-${++idCounter}`,
     });
@@ -1474,6 +1544,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "baseline-v1.pdf",
@@ -1522,6 +1593,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "baseline-v2-rejected.pdf",
@@ -1547,6 +1619,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       taskId: "upload-task",
       kind: "slides",
       fileName: "baseline-v3.pdf",
@@ -1630,6 +1703,11 @@ describe("private speaker asset lifecycle", () => {
       ),
     ).rejects.toThrow();
     expect(await bucket.head(binding().objectKey)).toMatchObject({ size: 3 });
+    expect(
+      await gateway.verifyUploadCapability(
+        binding({ subject: { kind: "speaker_session", sessionId: "session-1" } }),
+      ),
+    ).toBe(false);
 
     const firstDownload = await gateway.registerDownloadCapability(downloadBinding());
     const secondDownload = await gateway.registerDownloadCapability(downloadBinding());
@@ -1679,7 +1757,10 @@ describe("private speaker asset lifecycle", () => {
     ).rejects.toThrow("expired");
 
     const expired = await gateway.registerUploadCapability(
-      binding({ capabilityId: "expired", expiresAt: new Date(Date.now() - 1_000).toISOString() }),
+      binding({
+        capabilityId: "expired",
+        expiresAt: new Date(Date.now() - 1_000).toISOString(),
+      }),
     );
     const expiredToken = opaqueToken(expired.url);
     await expect(
@@ -1776,10 +1857,10 @@ describe("private speaker asset lifecycle", () => {
     }
   });
 
-  it("accepts participant-scoped capabilities without a submission binding", async () => {
+  it("accepts participant-scoped capabilities without a session binding", async () => {
     const bucket = new MemoryBucket();
     const gateway = new R2PrivateAssetGateway(bucket as never, "https://api.invalid");
-    const { submissionId: _submissionId, ...participantBinding } = binding({
+    const participantBinding = binding({
       capabilityId: "participant-asset",
       objectKey: "events/event-1/participants/participant-1/headshot/participant-asset",
       contentType: "image/png",
@@ -1815,6 +1896,7 @@ describe("private speaker asset lifecycle", () => {
     const generatedIds = ["headshot-asset", "slides-asset"];
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => generatedIds.shift() ?? "unexpected-asset",
     });
@@ -1847,6 +1929,7 @@ describe("private speaker asset lifecycle", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         participantId: "participant-1",
+        sessionId: "speaker-submission:submission-1",
         kind: "slides",
         fileName: "x.pdf",
         contentType: "application/pdf",
@@ -1861,7 +1944,7 @@ describe("private speaker asset lifecycle", () => {
     for (const asset of repository.assets) asset.reviewedBy = "organizer";
 
     const retryResponse = await routes.request(
-      "/events/event-1/assets/headshot-asset/upload-authorization",
+      `/events/event-1/assets/${uploadBody.data.asset.id as string}/upload-authorization`,
       { method: "POST" },
     );
     const retryBody = (await retryResponse.json()) as {
@@ -1869,27 +1952,7 @@ describe("private speaker asset lifecycle", () => {
     };
     expect(retryResponse.status).toBe(200);
 
-    expect(
-      await routes.request("/assets/capabilities/upload/slides-asset/opaque-token", {
-        method: "PUT",
-        body: "x",
-      }),
-    ).toHaveProperty("status", 201);
-    const slidesObjectKey = repository.assets.find(
-      (asset) => asset.id === "slides-asset",
-    )?.objectKey;
-    if (slidesObjectKey === undefined) throw new Error("Expected the pending slides asset.");
-    gateway.uploaded.add(slidesObjectKey);
-
-    const finalizeResponse = await routes.request("/events/event-1/assets/slides-asset/finalize", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ state: "ready" }),
-    });
-    const finalizeBody = (await finalizeResponse.json()) as {
-      data: Record<string, unknown>;
-    };
-    expect(finalizeResponse.status).toBe(200);
+    const finalizeBody = { data: retryBody.data.asset };
 
     const listResponse = await routes.request("/events/event-1/assets");
     const listBody = (await listResponse.json()) as {
@@ -1897,7 +1960,9 @@ describe("private speaker asset lifecycle", () => {
     };
     expect(listResponse.status).toBe(200);
 
-    const historyResponse = await routes.request("/events/event-1/assets/slides-asset/history");
+    const historyResponse = await routes.request(
+      `/events/event-1/assets/${uploadBody.data.asset.id as string}/history`,
+    );
     const historyBody = (await historyResponse.json()) as {
       data: Record<string, unknown>[];
     };
@@ -1932,6 +1997,7 @@ describe("private speaker asset lifecycle", () => {
     const gateway = new CapabilityGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => "asset-retry-route",
     });
@@ -1939,6 +2005,7 @@ describe("private speaker asset lifecycle", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       fileName: "slides.pdf",
       contentType: "application/pdf",
@@ -2001,6 +2068,7 @@ describe("speaker participant workspace authorization and projections", () => {
       new CapabilityGateway(),
       {
         speakerSender,
+        sessionAuthority: acceptedTestSessionAuthority,
         now: () => new Date(now),
       },
     );
@@ -2029,6 +2097,7 @@ describe("speaker participant workspace authorization and projections", () => {
       new CapabilityGateway(),
       {
         speakerSender,
+        sessionAuthority: acceptedTestSessionAuthority,
         now: () => new Date(now),
         generateId: () => "generated-participant",
       },
@@ -2075,7 +2144,10 @@ describe("speaker participant workspace authorization and projections", () => {
     });
     expect(revoked.members).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ participantId: "participant-2", status: "revoked" }),
+        expect.objectContaining({
+          participantId: "participant-2",
+          status: "revoked",
+        }),
       ]),
     );
   });
@@ -2102,6 +2174,7 @@ describe("speaker participant workspace authorization and projections", () => {
     const ids = ["asset-history-1", "asset-history-2", "comment-1"];
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: () => ids.shift() ?? "generated-id",
     });
@@ -2109,6 +2182,7 @@ describe("speaker participant workspace authorization and projections", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       fileName: "slides.pdf",
       contentType: "application/pdf",
@@ -2125,6 +2199,7 @@ describe("speaker participant workspace authorization and projections", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       fileName: "slides-v2.pdf",
       contentType: "application/pdf",
@@ -2167,10 +2242,20 @@ describe("speaker participant workspace authorization and projections", () => {
         body: "Please use this version.",
         createdAt: now,
       }),
+      expect.objectContaining({
+        authorLabel: "Organizer",
+        body: "Priya, the updated deck is ready for review.",
+        createdAt: now,
+      }),
     ]);
     await expect(
       service.listAssetComments("event-1", "account-1", second.asset.id),
     ).resolves.toEqual([
+      expect.objectContaining({
+        authorLabel: "Priya Raman",
+        body: "Please use this version.",
+        createdAt: now,
+      }),
       expect.objectContaining({
         authorLabel: "Organizer",
         body: "Priya, the updated deck is ready for review.",
@@ -2184,8 +2269,12 @@ describe("speaker participant workspace authorization and projections", () => {
         authorLabel: "Priya Raman",
         body: "Please use this version.",
       }),
+      expect.objectContaining({
+        authorLabel: "Organizer",
+        body: "Priya, the updated deck is ready for review.",
+      }),
     ]);
-    const { submissionId: _submissionId, ...unboundAsset } = first.asset;
+    const { sessionId: _sessionId, ...unboundAsset } = first.asset;
     repository.assets.push({
       ...unboundAsset,
       id: "legacy-unbound-version",
@@ -2206,11 +2295,10 @@ describe("speaker participant workspace authorization and projections", () => {
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     const uploadTask = repository.tasks[0];
     if (uploadTask === undefined) throw new Error("Expected upload task fixture.");
-    const { submissionId: _taskSubmissionId, ...participantTask } = uploadTask;
+    const { ...participantTask } = uploadTask;
     repository.tasks.push({
       ...participantTask,
       id: "participant-upload-task",
-      submissionId: null,
       subject: { type: "participant", participantId: "participant-1" },
     });
     repository.assets.push({
@@ -2235,7 +2323,6 @@ describe("speaker participant workspace authorization and projections", () => {
     repository.tasks.push({
       ...participantTask,
       id: "organizer-action-task",
-      submissionId: null,
       owner: "organizer",
       type: "action",
       subject: { type: "participant", participantId: "participant-1" },
@@ -2265,6 +2352,7 @@ describe("speaker participant workspace authorization and projections", () => {
       new CapabilityGateway(),
       {
         speakerSender,
+        sessionAuthority: acceptedTestSessionAuthority,
         now: () => new Date(now),
       },
     );
@@ -2276,7 +2364,11 @@ describe("speaker participant workspace authorization and projections", () => {
       description: "Tell us about your session.",
       status: "in_progress",
       fields: [
-        expect.objectContaining({ id: "bio", type: "textarea", required: true }),
+        expect.objectContaining({
+          id: "bio",
+          type: "textarea",
+          required: true,
+        }),
         expect.objectContaining({
           id: "track",
           options: [{ value: "web", label: "Web" }],
@@ -2303,7 +2395,10 @@ describe("speaker participant workspace authorization and projections", () => {
       answers: { bio: "A speaker", track: "web" },
     });
     expect(first.history).toHaveLength(1);
-    expect(first.latestResponse).toMatchObject({ status: "draft", definitionVersion: 2 });
+    expect(first.latestResponse).toMatchObject({
+      status: "draft",
+      definitionVersion: 2,
+    });
     const second = await service.saveTaskResponse({
       eventId: "event-1",
       accountId: "account-1",
@@ -2333,12 +2428,16 @@ describe("speaker participant workspace authorization and projections", () => {
       new CapabilityGateway(),
       {
         speakerSender,
+        sessionAuthority: acceptedTestSessionAuthority,
         now: () => new Date(now),
       },
     );
     const resources = await service.listResources("event-1", "account-1");
     expect(resources).toEqual([
-      expect.objectContaining({ id: "resource-1", url: "https://docs.example.test/guide" }),
+      expect.objectContaining({
+        id: "resource-1",
+        url: "https://docs.example.test/guide",
+      }),
       expect.objectContaining({ id: "resource-2", html: "<p>safe</p>" }),
     ]);
     expect(resources[1]).not.toHaveProperty("url");
@@ -2371,12 +2470,11 @@ describe("organizer content-management contracts", () => {
     repository.tasks.push({
       id: "participant-2-upload-task",
       eventId: "event-1",
-      submissionId: "submission-2",
       participantId: "participant-2",
       subject: {
         type: "session",
         participantId: "participant-2",
-        submissionId: "submission-2",
+        sessionId: "speaker-submission:submission-2",
       },
       type: "upload",
       owner: "speaker",
@@ -2486,7 +2584,7 @@ describe("organizer content-management contracts", () => {
       id: "asset-ready",
       tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       taskId: "upload-task",
       kind: "slides",
@@ -2505,7 +2603,7 @@ describe("organizer content-management contracts", () => {
       id: "asset-pending",
       tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       taskId: "upload-task",
       kind: "headshot",
@@ -2522,6 +2620,7 @@ describe("organizer content-management contracts", () => {
     gateway.uploaded.add("opaque/r2/pending-headshot");
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
       generateId: (() => {
         let sequence = 0;
@@ -2543,7 +2642,15 @@ describe("organizer content-management contracts", () => {
       dueAt: "2027-05-01",
       allowedMimeTypes: ["application/pdf"],
       maxBytes: 10_000,
-      assignments: [{ participantId: "participant-1", submissionId: "submission-1" }],
+      assignments: [
+        {
+          participantId: "participant-1",
+          subject: {
+            type: "session",
+            sessionId: "speaker-submission:submission-1",
+          },
+        },
+      ],
     });
     expect(created[0]).toMatchObject({
       title: "Upload Session Presentation",
@@ -2559,13 +2666,24 @@ describe("organizer content-management contracts", () => {
         title: "Unauthorized",
         allowedMimeTypes: ["application/pdf"],
         maxBytes: 10_000,
-        assignments: [{ participantId: "participant-1", submissionId: "submission-1" }],
+        assignments: [
+          {
+            participantId: "participant-1",
+            subject: {
+              type: "session",
+              sessionId: "speaker-submission:submission-1",
+            },
+          },
+        ],
       }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     const matrix = await service.listDeliverables("event-1", "organizer");
     expect(matrix.items).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ participantId: "participant-1", status: "not_started" }),
+        expect.objectContaining({
+          participantId: "participant-1",
+          status: "not_started",
+        }),
       ]),
     );
     const preview = await service.previewOutstandingReminders({
@@ -2590,7 +2708,11 @@ describe("organizer content-management contracts", () => {
       accountId: "organizer",
       idempotencyKey: "reminder-1",
     });
-    expect(firstReminder).toMatchObject({ queued: true, duplicate: false, sentCount: 2 });
+    expect(firstReminder).toMatchObject({
+      queued: true,
+      duplicate: false,
+      sentCount: 2,
+    });
     expect(firstReminder.recipientIds).toEqual(preview.recipientIds);
     expect(secondReminder).toMatchObject({ queued: false, duplicate: true });
     expect(deliveryCalls).toEqual([
@@ -2604,7 +2726,10 @@ describe("organizer content-management contracts", () => {
       assetId: "asset-ready",
       state: "approved",
     });
-    expect(reviewed).toMatchObject({ reviewState: "approved", reviewVersion: 1 });
+    expect(reviewed).toMatchObject({
+      reviewState: "approved",
+      reviewVersion: 1,
+    });
     expect(audits).toHaveLength(1);
     const profile = await service.updateOrganizerProfile({
       eventId: "event-1",
@@ -2656,7 +2781,7 @@ it("projects exactly one latest ready asset as the organizer current version", a
       id: "family-v1",
       tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       taskId: "upload-task",
       kind: "slides",
@@ -2673,7 +2798,7 @@ it("projects exactly one latest ready asset as the organizer current version", a
       id: "family-v2",
       tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       taskId: "upload-task",
       kind: "slides",
@@ -2691,7 +2816,7 @@ it("projects exactly one latest ready asset as the organizer current version", a
       id: "family-v3-pending",
       tenantId: "tenant-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       taskId: "upload-task",
       kind: "slides",
@@ -2713,13 +2838,18 @@ it("projects exactly one latest ready asset as the organizer current version", a
     new CapabilityGateway(),
     {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
     },
   );
 
   const matrix = await service.listDeliverables("event-1", "organizer");
   const row = matrix.items.find((item) => item.task.id === "upload-task");
-  expect(row?.currentAsset).toMatchObject({ id: "family-v2", version: 2, state: "ready" });
+  expect(row?.currentAsset).toMatchObject({
+    id: "family-v2",
+    version: 2,
+    state: "ready",
+  });
   expect(row?.assets.map((asset) => asset.id)).toEqual([
     "family-v1",
     "family-v2",
@@ -2819,6 +2949,7 @@ describe("organizer immutable content history", () => {
       new CapabilityGateway(),
       {
         speakerSender,
+        sessionAuthority: acceptedTestSessionAuthority,
         now: () => new Date(now),
       },
     );
@@ -2947,7 +3078,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-old",
         tenantId: "tenant-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task",
         kind: "slides",
@@ -2964,7 +3095,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-current",
         tenantId: "tenant-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task",
         kind: "slides",
@@ -2985,7 +3116,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-collision",
         tenantId: "tenant-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task-2",
         kind: "slides",
@@ -3005,7 +3136,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-revoked",
         tenantId: "tenant-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task",
         kind: "slides",
@@ -3022,7 +3153,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-unavailable",
         tenantId: "tenant-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task",
         kind: "slides",
@@ -3039,7 +3170,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-cross-tenant",
         tenantId: "tenant-2",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task",
         kind: "slides",
@@ -3071,6 +3202,17 @@ describe("organizer deliverables exports", () => {
     };
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: {
+        getSession: async (organizationId: string, eventId: string) =>
+          ({
+            id: "accepted-session-1",
+            tenantId: organizationId,
+            eventId,
+            status: "accepted",
+            title: "Accepted schedule title",
+            speakerIds: ["participant-1"],
+          }) as never,
+      },
       now: () => new Date(now),
       generateId: (() => {
         let sequence = 0;
@@ -3096,7 +3238,12 @@ describe("organizer deliverables exports", () => {
       "asset-current",
     ]);
     expect(first.manifest.entries.every((entry) => entry.participantName === "A/B")).toBe(true);
-    expect(first.manifest.entries.every((entry) => entry.sessionTitle === "Session")).toBe(true);
+    expect(first.manifest.entries.every((entry) => entry.sessionId === "accepted-session-1")).toBe(
+      true,
+    );
+    expect(
+      first.manifest.entries.every((entry) => entry.sessionTitle === "Accepted schedule title"),
+    ).toBe(true);
     const paths = first.manifest.entries.map((entry) => entry.path);
     expect(paths.some((path) => path.endsWith("-2.pdf"))).toBe(true);
     expect(paths.every((path) => !path.includes(".."))).toBe(true);
@@ -3125,7 +3272,10 @@ describe("organizer deliverables exports", () => {
     });
     const ownerResponse = await app.request("/events/event-1/organizer/deliverables/export", {
       method: "POST",
-      headers: { authorization: "Bearer organizer", "content-type": "application/json" },
+      headers: {
+        authorization: "Bearer organizer",
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ assetIds: ["asset-current"] }),
     });
     expect(ownerResponse.status).toBe(200);
@@ -3133,13 +3283,19 @@ describe("organizer deliverables exports", () => {
     expect(ownerResponse.headers.get("content-disposition")).toContain("attachment");
     const adminResponse = await app.request("/events/event-1/organizer/deliverables/export", {
       method: "POST",
-      headers: { authorization: "Bearer admin", "content-type": "application/json" },
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ taskIds: ["upload-task"] }),
     });
     expect(adminResponse.status).toBe(200);
     const reviewerResponse = await app.request("/events/event-1/organizer/deliverables/export", {
       method: "POST",
-      headers: { authorization: "Bearer reviewer", "content-type": "application/json" },
+      headers: {
+        authorization: "Bearer reviewer",
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ assetIds: ["asset-current"] }),
     });
     expect(reviewerResponse.status).toBe(404);
@@ -3169,7 +3325,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-family-v1-ready",
         tenantId: "tenant-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task",
         kind: "slides",
@@ -3186,7 +3342,7 @@ describe("organizer deliverables exports", () => {
         id: "asset-family-v2-pending",
         tenantId: "tenant-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "upload-task",
         kind: "slides",
@@ -3211,6 +3367,7 @@ describe("organizer deliverables exports", () => {
     });
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
     });
 
@@ -3244,6 +3401,7 @@ describe("organizer deliverables exports", () => {
     missingGateway.readObject = undefined;
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: acceptedTestSessionAuthority,
       now: () => new Date(now),
     });
     await expect(

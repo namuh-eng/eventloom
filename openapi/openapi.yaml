@@ -3980,14 +3980,22 @@ components:
       additionalProperties: false
     AgendaCatalogSession:
       type: object
-      required: [id, title, status, participantIds, resourceIds, capacityRequired]
+      required: [id, title, status, publicApprovalEligible, participantIds, resourceIds, capacityRequired]
       properties:
         id: { $ref: "#/components/schemas/Identifier" }
         title: { type: string, minLength: 1, maxLength: 1_000 }
         status: { type: string, const: accepted }
+        publicApprovalEligible: { type: boolean }
         participantIds: { type: array, items: { $ref: "#/components/schemas/Identifier" } }
         resourceIds: { type: array, items: { $ref: "#/components/schemas/Identifier" } }
         capacityRequired: { type: integer, minimum: 0 }
+        durationMinutes: { type: integer, minimum: 1, maximum: 1_440 }
+        format: { type: string }
+        summary: { type: string, maxLength: 20_000 }
+        speakerNames: { type: array, items: { type: string } }
+        trackIds: { type: array, items: { $ref: "#/components/schemas/Identifier" } }
+        roomName: { type: string }
+        trackNames: { type: array, items: { type: string } }
       additionalProperties: false
     AgendaCatalogResponse:
       type: object
@@ -4019,13 +4027,9 @@ components:
       additionalProperties: false
     AgendaCreate:
       type: object
-      required: [timeZone, minimumTravelMinutes, sessions, rooms, tracks]
+      required: [minimumTravelMinutes]
       properties:
-        timeZone: { type: string, minLength: 1, maxLength: 100 }
         minimumTravelMinutes: { type: integer, minimum: 0, maximum: 1_440 }
-        sessions: { type: array, items: { $ref: "#/components/schemas/AgendaCatalogSession" } }
-        rooms: { type: array, items: { $ref: "#/components/schemas/Room" } }
-        tracks: { type: array, items: { $ref: "#/components/schemas/Taxonomy" } }
       additionalProperties: false
     AgendaDraftUpdate:
       type: object
@@ -4663,14 +4667,35 @@ components:
       additionalProperties: false
     PortalTask:
       type: object
-      required: [id, eventId, title, status, version]
+      required: [id, eventId, title, status, subject, version]
       properties:
         id: { $ref: "#/components/schemas/Identifier" }
         eventId: { $ref: "#/components/schemas/Identifier" }
+        subject: { $ref: "#/components/schemas/SpeakerTaskSubject" }
         title: { type: string, maxLength: 300 }
         status: { type: string, enum: [pending, in_progress, submitted, needs_changes, complete, reopened] }
         dueAt: { $ref: "#/components/schemas/Timestamp" }
         version: { $ref: "#/components/schemas/Version" }
+      additionalProperties: false
+    SpeakerTaskSubject:
+      oneOf:
+        - type: object
+          required: [type]
+          properties:
+            type: { type: string, const: participant }
+          additionalProperties: false
+        - type: object
+          required: [type, sessionId]
+          properties:
+            type: { type: string, const: session }
+            sessionId: { $ref: "#/components/schemas/Identifier" }
+          additionalProperties: false
+    SpeakerTaskAssignment:
+      type: object
+      required: [participantId, subject]
+      properties:
+        participantId: { $ref: "#/components/schemas/Identifier" }
+        subject: { $ref: "#/components/schemas/SpeakerTaskSubject" }
       additionalProperties: false
     PortalTaskResponse:
       type: object
@@ -4741,7 +4766,7 @@ components:
         id: { $ref: "#/components/schemas/Identifier" }
         eventId: { $ref: "#/components/schemas/Identifier" }
         participantId: { $ref: "#/components/schemas/Identifier" }
-        submissionId: { $ref: "#/components/schemas/Identifier" }
+        sessionId: { $ref: "#/components/schemas/Identifier" }
         participantName: { type: string, maxLength: 200 }
         taskId: { $ref: "#/components/schemas/Identifier" }
         sessionTitle: { type: string, maxLength: 500 }
@@ -4779,7 +4804,7 @@ components:
       required: [participantId, kind, fileName, contentType, sizeBytes]
       properties:
         participantId: { $ref: "#/components/schemas/Identifier" }
-        submissionId: { $ref: "#/components/schemas/Identifier" }
+        sessionId: { $ref: "#/components/schemas/Identifier" }
         taskId: { $ref: "#/components/schemas/Identifier" }
         kind: { type: string, enum: [headshot, slides, supporting_file] }
         fileName: { type: string, minLength: 1, maxLength: 512 }
@@ -4793,7 +4818,7 @@ components:
       required: [participantId, kind, fileName, contentType, sizeBytes]
       properties:
         participantId: { $ref: "#/components/schemas/Identifier" }
-        submissionId: { $ref: "#/components/schemas/Identifier" }
+        sessionId: { $ref: "#/components/schemas/Identifier" }
         kind: { type: string, enum: [headshot] }
         fileName: { type: string, minLength: 1, maxLength: 120 }
         contentType: { type: string, enum: [image/jpeg, image/png, image/webp] }

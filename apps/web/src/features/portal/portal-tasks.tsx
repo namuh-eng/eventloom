@@ -75,7 +75,6 @@ function PortalTasksContent() {
             <PortalTaskInbox
               tasks={visible}
               profiles={view.profiles}
-              submissions={view.submissions}
               selectedId={selected?.id ?? null}
               filter={filter}
               {...(context?.temporalContext === undefined

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { assetPointerLabels, resolveAssetPointers } from "./portal-assets";
-import { commentsForAsset, resolveTaskAsset } from "./portal-task-assets";
+import {
+  commentsForAsset,
+  commentsForAssetVersion,
+  commentThreadExpectedVersion,
+  resolveTaskAsset,
+} from "./portal-task-assets";
 import {
   actionTaskPresentation,
   getTaskUploadPolicy,
@@ -16,7 +21,7 @@ function task(overrides: Record<string, unknown> = {}): PortalTask {
   return {
     id: "task-1",
     eventId: "event-1",
-    submissionId: "submission-1",
+    subject: { type: "session", sessionId: "session-1" },
     participantId: "participant-1",
     type: "upload",
     owner: "speaker",
@@ -35,7 +40,7 @@ function asset(id: string, overrides: Record<string, unknown> = {}): PortalAsset
   return {
     id,
     eventId: "event-1",
-    submissionId: "submission-1",
+    sessionId: "session-1",
     participantId: "participant-1",
     taskId: "task-1",
     kind: "slides",
@@ -142,43 +147,65 @@ describe("portal task deliverable helpers", () => {
 
   it("distinguishes participant tasks from session tasks and reports missing accepted sessions", () => {
     const participantTask = task({
-      submissionId: null,
-      subject: { type: "participant", participantId: "participant-1" },
+      subject: { type: "participant" },
     });
     expect(resolveTaskSubject(participantTask)).toEqual({
-      subject: { type: "participant", participantId: "participant-1" },
+      subject: { type: "participant" },
+      error: null,
+    });
+    expect(
+      taskSubjectPresentation(participantTask, [
+        {
+          id: "profile-1",
+          eventId: "event-1",
+          participantId: "participant-1",
+          displayName: "Ada Speaker",
+          biography: "",
+          version: 1,
+          updatedAt: "2026-08-12T12:00:00.000Z",
+        },
+      ]).label,
+    ).toContain("Ada Speaker");
+
+    const sessionTask = task({
+      subject: { type: "session", sessionId: "session-1" },
+      sessionTitle: "Canonical program session",
+    });
+    expect(taskSubjectPresentation(sessionTask, [])).toMatchObject({
+      label: "Session · Canonical program session",
       error: null,
     });
     expect(
       taskSubjectPresentation(
-        participantTask,
-        [
-          {
-            id: "profile-1",
-            eventId: "event-1",
-            participantId: "participant-1",
-            displayName: "Ada Speaker",
-            biography: "",
-            version: 1,
-            updatedAt: "2026-08-12T12:00:00.000Z",
-          },
-        ],
+        task({ subject: { type: "session", sessionId: "missing-session" } }),
         [],
-      ).label,
-    ).toContain("Ada Speaker");
-
-    const sessionTask = task({
-      submissionId: "missing-session",
-      subject: {
-        type: "session",
-        participantId: "participant-1",
-        submissionId: "missing-session",
-      },
-    });
-    expect(taskSubjectPresentation(sessionTask, [], [])).toMatchObject({
+      ),
+    ).toMatchObject({
       label: "Session unavailable",
-      error: "This session-scoped task has no matching accepted submission.",
+      error: "This session-scoped task has no matching accepted program session.",
     });
+  });
+  it("rejects legacy submission-scoped task subjects", () => {
+    const legacy = {
+      ...task(),
+      subject: undefined,
+      submissionId: "proposal-1",
+    } as unknown as PortalTask;
+
+    expect(resolveTaskSubject(legacy)).toMatchObject({
+      subject: null,
+      error: "Task subject metadata is missing.",
+    });
+  });
+  it("matches task assets by exact canonical session ID", () => {
+    const taskValue = task({ subject: { type: "session", sessionId: "session-1" } });
+
+    expect(
+      resolveTaskAsset(taskValue, [asset("asset-other", { sessionId: "proposal-1" })]).status,
+    ).toBe("empty");
+    expect(
+      resolveTaskAsset(taskValue, [asset("asset-session", { sessionId: "session-1" })]).status,
+    ).toBe("missing-metadata");
   });
 
   it("uses pointer IDs rather than array order for version state", () => {
@@ -216,8 +243,8 @@ describe("portal task deliverable helpers", () => {
     expect(conflict.status).toBe("conflict");
   });
 
-  it("keeps comments bound to the exact immutable asset version", () => {
-    const selected = asset("asset-v2", { versionId: "version-v2", version: 2 });
+  it("renders family comments while keeping CAS scoped to the selected immutable version", () => {
+    const selected = asset("asset-v1", { versionId: "version-v1", version: 1 });
     const comments = commentsForAsset(selected, [
       {
         id: "comment-v2",
@@ -226,24 +253,36 @@ describe("portal task deliverable helpers", () => {
         body: "Use the updated deck.",
         authorLabel: "Organizer",
         createdAt: "2026-08-12T12:00:00.000Z",
+        version: 4,
       } as never,
       {
         id: "comment-v1",
-        assetId: "asset-v2",
+        assetId: "asset-v1",
         versionId: "version-v1",
         body: "Old version note.",
         authorLabel: "Organizer",
         createdAt: "2026-08-12T12:00:00.000Z",
+        version: 2,
       } as never,
       {
         id: "comment-family",
-        assetId: "family-1",
+        assetId: "asset-v1",
         versionId: "version-v2",
         body: "Family thread.",
         authorLabel: "Organizer",
         createdAt: "2026-08-12T12:00:00.000Z",
+        version: 3,
       } as never,
     ]);
-    expect(comments.map((comment) => comment.id)).toEqual(["comment-v2"]);
+    const threadComments = commentsForAssetVersion(selected, comments);
+    expect(comments.map((comment) => comment.id)).toEqual([
+      "comment-v2",
+      "comment-v1",
+      "comment-family",
+    ]);
+    expect(threadComments.map((comment) => comment.id)).toEqual(["comment-v1"]);
+    expect(commentThreadExpectedVersion(threadComments)).toBe(2);
+    const emptyV1Thread = commentsForAssetVersion(selected, []);
+    expect(commentThreadExpectedVersion(emptyV1Thread)).toBe(0);
   });
 });

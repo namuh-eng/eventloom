@@ -3,7 +3,15 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { type PortalApi, PortalApiError } from "./api";
 import {
+  assetMatchesPendingRetry,
+  isOptionalGuideReadFailure,
+  isOptionalWorkspaceSubreadFailure,
+  shouldIsolateWorkspaceReadFailure,
+  workspaceReplacementTuple,
+} from "./portal-provider";
+import {
   assetBelongsToPortalContext,
+  assetFamilyCommentResponseAuthorized,
   createPortalProviderApi,
   loadPortalRosters,
   participantSafeGuideFailure,
@@ -146,17 +154,19 @@ describe("speaker portal provider", () => {
     expect(() => portalContextResponseForTarget(target, undefined)).toThrow(PortalApiError);
   });
 
-  it("rejects an asset whose task and submission belong to different authorized sessions", () => {
+  it("rejects an asset whose task and session belong to different authorized sessions", () => {
     const crossSessionTarget: PortalContext = {
       ...target,
+      capabilities: ["roster-manage", "task-response"],
       submissionIds: ["speaker-submission:submission-1", "speaker-submission:submission-2"],
     };
     const task: PortalTask = {
       id: "task-1",
       eventId: "event-1",
-      submissionId: "speaker-submission:submission-1",
+      subject: { type: "session", sessionId: "session-1" },
       participantId: "participant-1",
       type: "upload",
+      acceptedAssetKinds: ["slides"],
       owner: "speaker",
       title: "Upload slides",
       status: "not_started",
@@ -168,7 +178,7 @@ describe("speaker portal provider", () => {
     const asset: PortalAsset = {
       id: "asset-1",
       eventId: "event-1",
-      submissionId: "speaker-submission:submission-2",
+      sessionId: "session-2",
       participantId: "participant-1",
       taskId: task.id,
       kind: "slides",
@@ -180,24 +190,92 @@ describe("speaker portal provider", () => {
     };
     const profileAsset: PortalAsset = {
       ...asset,
-      submissionId: "speaker-submission:submission-1",
       kind: "headshot",
     };
     delete profileAsset.taskId;
+    delete profileAsset.sessionId;
 
     expect(assetBelongsToPortalContext(asset, crossSessionTarget, [task])).toBe(false);
     expect(
-      assetBelongsToPortalContext({ ...asset, submissionId: "submission-1" }, crossSessionTarget, [
-        task,
-      ]),
+      assetBelongsToPortalContext({ ...asset, sessionId: "session-1" }, crossSessionTarget, [task]),
     ).toBe(true);
     expect(profileAssetBelongsToPortalContext(profileAsset, target)).toBe(true);
-    expect(
-      profileAssetBelongsToPortalContext({ ...profileAsset, submissionId: "submission-2" }, target),
-    ).toBe(false);
     expect(profileAssetBelongsToPortalContext({ ...profileAsset, taskId: task.id }, target)).toBe(
       false,
     );
+  });
+  it("accepts self-consistent sibling comments from an authorized family endpoint", () => {
+    const task: PortalTask = {
+      id: "task-family",
+      eventId: "event-1",
+      subject: { type: "session", sessionId: "session-1" },
+      participantId: "participant-1",
+      type: "upload",
+      acceptedAssetKinds: ["slides"],
+      owner: "speaker",
+      title: "Upload slides",
+      status: "submitted",
+      dependencyIds: [],
+      reminderOffsetsMinutes: [],
+      version: 2,
+      updatedAt: "2026-08-09T00:00:00.000Z",
+    };
+    const first: PortalAsset = {
+      id: "asset-v1",
+      eventId: "event-1",
+      sessionId: "session-1",
+      participantId: "participant-1",
+      taskId: task.id,
+      kind: "slides",
+      fileName: "slides.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 10,
+      state: "ready",
+      versionFamilyId: "family-1",
+      createdAt: "2026-08-09T00:00:00.000Z",
+    };
+    const second: PortalAsset = {
+      ...first,
+      id: "asset-v2",
+      supersedesAssetId: first.id,
+    };
+    const scopedView = view([]);
+    scopedView.tasks = [task];
+    const familyTarget: PortalContext = {
+      ...target,
+      capabilities: [...target.capabilities, "task-response"],
+    };
+
+    expect(
+      assetFamilyCommentResponseAuthorized(
+        second.id,
+        first.id,
+        first.id,
+        familyTarget,
+        scopedView,
+        [first, second],
+      ),
+    ).toBe(true);
+    expect(
+      assetFamilyCommentResponseAuthorized(
+        second.id,
+        first.id,
+        second.id,
+        familyTarget,
+        scopedView,
+        [first, second],
+      ),
+    ).toBe(false);
+    expect(
+      assetFamilyCommentResponseAuthorized(
+        "unauthorized-asset",
+        first.id,
+        first.id,
+        familyTarget,
+        scopedView,
+        [first, second],
+      ),
+    ).toBe(false);
   });
 
   it("loads only accepted rosters for the active authorized session", async () => {
@@ -290,6 +368,130 @@ describe("speaker portal provider", () => {
     expect(crossIdentity.entries).toEqual([]);
     expect(crossIdentity.failures[0]).toBeInstanceOf(PortalApiError);
   });
+  it("keeps an anti-enumeration authority 404 fatal while guide 404 is isolated", () => {
+    const missing = new PortalApiError("NOT_FOUND", "missing", 404);
+
+    expect(shouldIsolateWorkspaceReadFailure("authority", missing)).toBe(false);
+    expect(shouldIsolateWorkspaceReadFailure("guide", missing)).toBe(true);
+    expect(isOptionalWorkspaceSubreadFailure(missing)).toBe(true);
+    expect(shouldIsolateWorkspaceReadFailure("optional", missing)).toBe(true);
+    expect(
+      isOptionalWorkspaceSubreadFailure(new PortalApiError("UNAUTHORIZED", "denied", 401)),
+    ).toBe(false);
+    expect(
+      isOptionalWorkspaceSubreadFailure(new PortalApiError("CONTEXT_MISMATCH", "wrong scope", 404)),
+    ).toBe(false);
+    expect(isOptionalGuideReadFailure(new PortalApiError("UNAUTHORIZED", "denied", 401))).toBe(
+      false,
+    );
+    expect(isOptionalGuideReadFailure(new PortalApiError("FORBIDDEN", "denied", 403))).toBe(false);
+    expect(
+      isOptionalGuideReadFailure(new PortalApiError("CONTEXT_MISMATCH", "wrong scope", 404)),
+    ).toBe(false);
+  });
+
+  it("uses the finalized authoritative latest task-bound family head for replacement CAS", () => {
+    const v1: PortalAsset = {
+      id: "asset-v1",
+      eventId: "event-1",
+      sessionId: "session-1",
+      participantId: "participant-1",
+      taskId: "task-1",
+      kind: "slides",
+      fileName: "slides.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 10,
+      state: "ready",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      version: 1,
+      versionId: "asset-v1",
+      versionFamilyId: "family-1",
+      latestVersionId: "asset-v2",
+      currentVersionId: "asset-v1",
+    };
+    const v2: PortalAsset = {
+      ...v1,
+      id: "asset-v2",
+      state: "rejected",
+      version: 2,
+      versionId: "asset-v2",
+      supersedesAssetId: v1.id,
+      latestVersionId: "asset-v2",
+      currentVersionId: "asset-v1",
+    };
+
+    expect(workspaceReplacementTuple([v1, v2], v1.id)).toBeNull();
+    expect(workspaceReplacementTuple([v1, v2], v2.id)).toMatchObject({
+      predecessor: v2,
+      sessionId: "session-1",
+      taskId: "task-1",
+      versionFamilyId: "family-1",
+      expectedLatestVersion: 2,
+      successorVersion: 3,
+    });
+  });
+  it("preserves one pending task asset identity through retry and finalization", () => {
+    const pending: PortalAsset = {
+      id: "asset-pending",
+      eventId: "event-1",
+      participantId: "participant-1",
+      sessionId: "session-1",
+      taskId: "task-1",
+      kind: "slides",
+      fileName: "slides.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 608,
+      state: "pending_upload",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      version: 1,
+      versionId: "asset-pending",
+      versionFamilyId: "asset-pending",
+      latestVersionId: "asset-pending",
+    };
+    const input = {
+      eventId: "event-1",
+      participantId: "participant-1",
+      sessionId: "session-1",
+      taskId: "task-1",
+      kind: "slides" as const,
+    };
+
+    expect(assetMatchesPendingRetry(pending, pending, { ...input, state: "pending_upload" })).toBe(
+      true,
+    );
+    expect(
+      assetMatchesPendingRetry(
+        { ...pending, state: "ready", currentVersionId: pending.id },
+        pending,
+        { ...input, state: "ready" },
+      ),
+    ).toBe(true);
+    expect(
+      assetMatchesPendingRetry({ ...pending, id: "parallel-asset" }, pending, {
+        ...input,
+        state: "pending_upload",
+      }),
+    ).toBe(false);
+  });
+  it("fails closed when the authoritative predecessor lacks immutable version identity", () => {
+    const asset: PortalAsset = {
+      id: "asset-v1",
+      eventId: "event-1",
+      participantId: "participant-1",
+      kind: "headshot",
+      fileName: "headshot.png",
+      contentType: "image/png",
+      sizeBytes: 10,
+      state: "ready",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      version: 1,
+      versionFamilyId: "family-1",
+      latestVersionId: "asset-v1",
+      currentVersionId: "asset-v1",
+    };
+
+    expect(workspaceReplacementTuple([asset], asset.id)).toBeNull();
+  });
   it("keeps participant switching scoped to state updates while the workspace view owns loading", () => {
     const providerSource = readFileSync(
       fileURLToPath(new URL("./portal-provider.tsx", import.meta.url)),
@@ -317,6 +519,26 @@ describe("speaker portal provider", () => {
     expect(workspaceSource).toContain("if (context && view) void portal.loadWorkspace();");
     expect(workspaceSource.split("if (context && view) void portal.loadWorkspace();")).toHaveLength(
       2,
+    );
+  });
+  it("keeps comment loading to one request per selected asset and disables posting while loading", () => {
+    const providerSource = readFileSync(
+      fileURLToPath(new URL("./portal-provider.tsx", import.meta.url)),
+      "utf8",
+    );
+    const assetViewSource = readFileSync(
+      fileURLToPath(new URL("./portal-task-asset-view.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(providerSource).toContain("const clearWorkspaceError = useCallback(");
+    expect(providerSource).toContain("const clearMutationError = useCallback(");
+    expect(assetViewSource.split("void loadAssetComments(selectedAssetId)")).toHaveLength(2);
+    expect(assetViewSource).toContain(
+      "}, [selectedAssetId, clearWorkspaceError, loadAssetComments]);",
+    );
+    expect(assetViewSource).toContain(
+      "disabled={commentsLoading || commentPending || !comment.trim()}",
     );
   });
 });

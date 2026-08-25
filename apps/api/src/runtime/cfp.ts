@@ -442,7 +442,7 @@ class LocalCfpFileAssetGateway implements CfpFileAssetGateway {
         capabilityId: assetId,
         tenantId: input.tenantId,
         eventId: input.eventId,
-        submissionId: submission.id,
+        subject: { kind: "cfp_submission", submissionId: submission.id },
         participantId: input.participantId ?? "cfp-submission",
         objectKey,
         contentType,

@@ -27,6 +27,7 @@ import type {
   SpeakerAssetAuditEntry,
   SpeakerAssetComment,
   SpeakerAssetReviewCommand,
+  SpeakerDecisionWriteFence,
   SpeakerEventResource,
   SpeakerImportPreview,
   SpeakerImportRow,
@@ -38,7 +39,6 @@ import type {
   SpeakerPortalContext,
   SpeakerPortalContextScopeProjection,
   SpeakerProfile,
-  SpeakerDecisionWriteFence,
   SpeakerSubmission,
   SpeakerTask,
   SpeakerTaskFormDefinition,
@@ -75,8 +75,6 @@ export function portalSubmissionStatus(
 
 const json = (value: unknown): string => JSON.stringify(value);
 const auditLabel = "__speaker_asset_audit__";
-const d1SubmissionId = (value: string): string =>
-  value.startsWith("speaker-submission:") ? value.slice("speaker-submission:".length) : value;
 
 type EventScope = { organizationId: string; eventId: string };
 
@@ -1266,7 +1264,7 @@ export class D1SpeakerRepository
     submissionIds: readonly string[],
   ): Promise<SpeakerSubmission[]> {
     if (submissionIds.length === 0) return [];
-    const storedSubmissionIds = [...new Set(submissionIds.map(d1SubmissionId))];
+    const storedSubmissionIds = [...new Set(submissionIds)];
     const rows = await this.#orm
       .select()
       .from(submissions)
@@ -1345,7 +1343,7 @@ export class D1SpeakerRepository
         and(
           eq(submissions.organizationId, organizationId),
           eq(submissions.eventId, eventId),
-          inArray(submissions.id, [...new Set(submissionIds.map(d1SubmissionId))]),
+          inArray(submissions.id, [...new Set(submissionIds)]),
         ),
       );
     const result: OrganizationQualifiedSpeakerSubmission[] = [];
@@ -1616,7 +1614,9 @@ export class D1SpeakerRepository
           inArray(speakerTasks.participantId, [...new Set(participantIds)]),
         ),
       );
-    return Promise.all(rows.map((row) => this.#task(row)));
+    return Promise.all(
+      rows.map(async (row) => ({ ...(await this.#task(row)), tenantId: row.organizationId })),
+    );
   }
 
   async listTasksForOrganization(
@@ -1646,7 +1646,9 @@ export class D1SpeakerRepository
       .from(speakerTasks)
       .where(and(eq(speakerTasks.eventId, eventId), eq(speakerTasks.id, taskId)))
       .limit(1);
-    return rows[0] === undefined ? null : this.#task(rows[0]);
+    return rows[0] === undefined
+      ? null
+      : { ...(await this.#task(rows[0])), tenantId: rows[0].organizationId };
   }
 
   async getTasksByIds(eventId: string, taskIds: readonly string[]): Promise<SpeakerTask[]> {
@@ -1657,7 +1659,9 @@ export class D1SpeakerRepository
       .where(
         and(eq(speakerTasks.eventId, eventId), inArray(speakerTasks.id, [...new Set(taskIds)])),
       );
-    return Promise.all(rows.map((row) => this.#task(row)));
+    return Promise.all(
+      rows.map(async (row) => ({ ...(await this.#task(row)), tenantId: row.organizationId })),
+    );
   }
 
   async getTaskForm(eventId: string, taskId: string): Promise<SpeakerTaskFormDefinition | null> {
@@ -1913,14 +1917,14 @@ export class D1SpeakerRepository
     await this.#db.batch([
       this.#db
         .prepare(
-          `INSERT INTO speaker_assets (id, organization_id, event_id, submission_id, participant_id, task_id, kind, object_key, file_name, content_type, size_bytes, uploader_account_id, uploader_label, state, version, version_family_id, supersedes_asset_id, comment_thread_id, review_state, review_note, reviewed_at, reviewed_by, review_version, latest_version_id, current_version_id, approved_version_id, released_version_id, rejection_reason, created_at, finalized_at)
+          `INSERT INTO speaker_assets (id, organization_id, event_id, session_id, participant_id, task_id, kind, object_key, file_name, content_type, size_bytes, uploader_account_id, uploader_label, state, version, version_family_id, supersedes_asset_id, comment_thread_id, review_state, review_note, reviewed_at, reviewed_by, review_version, latest_version_id, current_version_id, approved_version_id, released_version_id, rejection_reason, created_at, finalized_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           asset.id,
           scope.organizationId,
           asset.eventId,
-          asset.submissionId ?? null,
+          asset.sessionId ?? null,
           asset.participantId,
           asset.taskId ?? null,
           asset.kind,
@@ -2056,7 +2060,7 @@ export class D1SpeakerRepository
       this.#db
         .prepare(
           `INSERT INTO speaker_assets (
-             id, organization_id, event_id, submission_id, participant_id, task_id,
+             id, organization_id, event_id, session_id, participant_id, task_id,
              kind, object_key, file_name, content_type, size_bytes,
              uploader_account_id, uploader_label, state, version, version_family_id,
              supersedes_asset_id, comment_thread_id, review_state, review_note,
@@ -2072,13 +2076,13 @@ export class D1SpeakerRepository
                WHERE organization_id = ?
                  AND event_id = ?
                  AND creation_idempotency_key = ?
-            )`,
+           )`,
         )
         .bind(
           asset.id,
           scope.organizationId,
           asset.eventId,
-          asset.submissionId ?? null,
+          asset.sessionId ?? null,
           asset.participantId,
           asset.taskId ?? null,
           asset.kind,
@@ -2592,12 +2596,13 @@ export class D1SpeakerRepository
     const scope = await this.#eventScope(command.task.eventId);
     if (scope === null) return { ok: false, reason: "not_found" };
     const task = command.task;
+    const sessionId = task.subject.type === "session" ? task.subject.sessionId : null;
     const statements: D1PreparedStatement[] = [];
     if (create) {
       statements.push(
         this.#db
           .prepare(
-            `INSERT INTO speaker_tasks (id, organization_id, event_id, submission_id, participant_id, type, owner, title, description, instructions, status, due_at, allowed_mime_types_json, max_bytes, accepted_asset_kinds_json, replacement_baseline_asset_id, version, created_at, updated_at)
+            `INSERT INTO speaker_tasks (id, organization_id, event_id, session_id, participant_id, type, owner, title, description, instructions, status, due_at, allowed_mime_types_json, max_bytes, accepted_asset_kinds_json, replacement_baseline_asset_id, version, created_at, updated_at)
          ${
            command.decisionFence === undefined
              ? "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -2618,7 +2623,7 @@ export class D1SpeakerRepository
             task.id,
             scope.organizationId,
             task.eventId,
-            task.submissionId === null ? null : d1SubmissionId(task.submissionId),
+            sessionId,
             task.participantId,
             task.type,
             task.owner,
@@ -2650,11 +2655,11 @@ export class D1SpeakerRepository
       statements.push(
         this.#db
           .prepare(
-            `UPDATE speaker_tasks SET submission_id = ?, participant_id = ?, type = ?, owner = ?, title = ?, description = ?, instructions = ?, status = ?, due_at = ?, allowed_mime_types_json = ?, max_bytes = ?, accepted_asset_kinds_json = ?, replacement_baseline_asset_id = ?, version = ?, updated_at = ?
+            `UPDATE speaker_tasks SET session_id = ?, participant_id = ?, type = ?, owner = ?, title = ?, description = ?, instructions = ?, status = ?, due_at = ?, allowed_mime_types_json = ?, max_bytes = ?, accepted_asset_kinds_json = ?, replacement_baseline_asset_id = ?, version = ?, updated_at = ?
          WHERE organization_id = ? AND event_id = ? AND id = ? AND version = ?`,
           )
           .bind(
-            task.submissionId === null ? null : d1SubmissionId(task.submissionId),
+            sessionId,
             task.participantId,
             task.type,
             task.owner,
@@ -2850,12 +2855,11 @@ export class D1SpeakerRepository
     return {
       id: row.id,
       eventId: row.eventId,
-      submissionId: row.submissionId,
       participantId: row.participantId,
       subject:
-        row.submissionId === null
+        row.sessionId === null
           ? { type: "participant", participantId: row.participantId }
-          : { type: "session", participantId: row.participantId, submissionId: row.submissionId },
+          : { type: "session", participantId: row.participantId, sessionId: row.sessionId },
       type: row.type,
       owner: row.owner,
       title: row.title,
@@ -2945,9 +2949,9 @@ export class D1SpeakerRepository
       id: String(row.id),
       tenantId: String(row.organization_id),
       eventId: String(row.event_id),
-      ...(row.submission_id === null || row.submission_id === undefined
+      ...(row.session_id === null || row.session_id === undefined
         ? {}
-        : { submissionId: String(row.submission_id) }),
+        : { sessionId: String(row.session_id) }),
       participantId: String(row.participant_id),
       ...(row.task_id === null || row.task_id === undefined ? {} : { taskId: String(row.task_id) }),
       kind: String(row.kind) as SpeakerAsset["kind"],
@@ -3009,7 +3013,7 @@ export class D1SpeakerRepository
       id: row.id,
       tenantId: row.organizationId,
       eventId: row.eventId,
-      ...(row.submissionId === null ? {} : { submissionId: row.submissionId }),
+      ...(row.sessionId === null ? {} : { sessionId: row.sessionId }),
       participantId: row.participantId,
       ...(row.taskId === null ? {} : { taskId: row.taskId }),
       kind: row.kind,

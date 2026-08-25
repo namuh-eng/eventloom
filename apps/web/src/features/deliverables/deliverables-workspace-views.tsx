@@ -224,13 +224,11 @@ function taskRows(
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
   const profileById = new Map(profiles.map((profile) => [profile.participantId, profile]));
   return tasks.map((task) => {
-    const session = task.submissionId === null ? undefined : sessionById.get(task.submissionId);
+    const sessionId = task.subject.type === "session" ? task.subject.sessionId : undefined;
+    const session = sessionId === undefined ? undefined : sessionById.get(sessionId);
     const speaker = profileById.get(task.participantId);
     const relatedAssets = assets.filter(
-      (asset) =>
-        asset.participantId === task.participantId &&
-        (asset.taskId === task.id ||
-          (asset.taskId === undefined && asset.submissionId === task.submissionId)),
+      (asset) => asset.participantId === task.participantId && asset.taskId === task.id,
     );
     return {
       task,
@@ -253,7 +251,8 @@ function matrixRows(
   const profileById = new Map(profiles.map((profile) => [profile.participantId, profile]));
   return items.map((item) => {
     const task = item.task;
-    const session = task.submissionId === null ? undefined : sessionById.get(task.submissionId);
+    const sessionId = task.subject.type === "session" ? task.subject.sessionId : undefined;
+    const session = sessionId === undefined ? undefined : sessionById.get(sessionId);
     const speaker = profileById.get(item.participantId);
     return {
       task,
@@ -1175,7 +1174,11 @@ export function DeliverablesWorkspaceView({
           : "all",
       sessionId:
         filters.sessionId !== "all" &&
-        rows.some((row) => (row.task.submissionId ?? "participant") === filters.sessionId)
+        rows.some(
+          (row) =>
+            (row.task.subject.type === "session" ? row.task.subject.sessionId : "participant") ===
+            filters.sessionId,
+        )
           ? filters.sessionId
           : "all",
       taskId:

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   filterSubmissions,
   filterTasks,
-  findSubmissionForTask,
   isTaskBlocked,
   portalIdentityProfile,
   portalProfileHeadshot,
@@ -23,7 +22,7 @@ function task(overrides: Partial<PortalTask> = {}): PortalTask {
   return {
     id: "task-1",
     eventId: "event-1",
-    submissionId: "submission-1",
+    subject: { type: "participant" },
     participantId: "participant-1",
     type: "form",
     owner: "speaker",
@@ -71,31 +70,19 @@ describe("speaker portal view model", () => {
     expect(portalSubmissionIdsMatch("", "speaker-submission:")).toBe(false);
     expect(portalSubmissionIdsMatch("speaker-submission:", "speaker-submission:")).toBe(false);
   });
-  it("resolves canonical submission links across raw and prefixed IDs", () => {
+  it("matches task assets by exact task and session identity", () => {
     const linkedTask = task({
       eventId: "event-1",
-      submissionId: "submission-1",
+      subject: { type: "session", sessionId: "session-1" },
       participantId: "participant-1",
     });
-    expect(
-      findSubmissionForTask(linkedTask, [
-        {
-          id: "speaker-submission:submission-1",
-          eventId: "event-1",
-          title: "Canonical session",
-          status: "accepted",
-          participantIds: ["participant-1"],
-          updatedAt: "2026-08-08T12:00:00.000Z",
-        },
-      ]),
-    ).toMatchObject({ id: "speaker-submission:submission-1" });
     expect(
       portalTaskAsset(linkedTask, [
         {
           id: "asset-1",
           eventId: "event-1",
           participantId: "participant-1",
-          submissionId: "speaker-submission:submission-1",
+          sessionId: "session-1",
           taskId: linkedTask.id,
           kind: "slides",
           fileName: "slides.pdf",
@@ -103,6 +90,19 @@ describe("speaker portal view model", () => {
           sizeBytes: 10,
           state: "ready",
           createdAt: "2026-08-08T12:00:00.000Z",
+        },
+        {
+          id: "asset-wrong-session",
+          eventId: "event-1",
+          participantId: "participant-1",
+          sessionId: "session-2",
+          taskId: linkedTask.id,
+          kind: "slides",
+          fileName: "wrong.pdf",
+          contentType: "application/pdf",
+          sizeBytes: 10,
+          state: "ready",
+          createdAt: "2026-08-09T12:00:00.000Z",
         },
       ]),
     ).toMatchObject({ id: "asset-1" });
@@ -251,7 +251,7 @@ describe("speaker portal view model", () => {
     };
     const priyaTask = task({
       id: "task-priya",
-      submissionId: "session-priya",
+      subject: { type: "session", sessionId: "session-priya" },
       participantId: priyaParticipantId,
       type: "upload",
       status: "submitted",
@@ -259,7 +259,7 @@ describe("speaker portal view model", () => {
     });
     const marcusTask = task({
       id: "task-marcus",
-      submissionId: "session-marcus",
+      subject: { type: "session", sessionId: "session-marcus" },
       participantId: marcusParticipantId,
     });
     const assets: PortalAsset[] = [
@@ -278,7 +278,7 @@ describe("speaker portal view model", () => {
         id: "asset-slides-v1",
         eventId: "event-1",
         participantId: priyaParticipantId,
-        submissionId: "session-priya",
+        sessionId: "session-priya",
         taskId: priyaTask.id,
         kind: "slides",
         fileName: "slides-v1.pdf",
@@ -292,7 +292,7 @@ describe("speaker portal view model", () => {
         id: "asset-slides-v2",
         eventId: "event-1",
         participantId: priyaParticipantId,
-        submissionId: "speaker-submission:session-priya",
+        sessionId: "session-priya",
         taskId: priyaTask.id,
         kind: "slides",
         fileName: "slides-v2.pdf",
@@ -417,47 +417,37 @@ describe("speaker portal view model", () => {
     expect(portalProfileHeadshot(priyaProfile, scoped.assets ?? [])?.id).toBe("asset-headshot");
     expect(portalTaskAsset(priyaTask, scoped.assets ?? [])?.id).toBe("asset-slides-v2");
   });
-  it("fails closed when authorization has no submission or event match", () => {
+  it("retains an admitted participant's direct session task without CFP submission authority", () => {
     const context = {
       id: "portal:event-1",
       eventId: "event-1",
       name: "DevFlow Conf 2027",
-      capabilities: [],
+      capabilities: ["task-response"],
       submissionIds: [],
       participantIds: ["participant-priya"],
       primaryParticipantId: "participant-priya",
     } as const;
+    const directSessionTask = task({
+      id: "task-session",
+      subject: { type: "session", sessionId: "program-session-1" },
+      participantId: "participant-priya",
+    });
     const view: PortalView = {
-      submissions: [
-        {
-          id: "submission-1",
-          eventId: "event-1",
-          title: "Unscoped session",
-          status: "accepted",
-          participantIds: ["participant-priya"],
-          updatedAt: "2026-08-09T00:00:00.000Z",
-        },
-        {
-          id: "submission-2",
-          eventId: "event-2",
-          title: "Different event",
-          status: "accepted",
-          participantIds: ["participant-priya"],
-          updatedAt: "2026-08-09T00:00:00.000Z",
-        },
-      ],
+      submissions: [],
       profiles: [],
       tasks: [
-        task({ id: "task-unscoped", submissionId: "submission-1" }),
-        task({ id: "task-other-event", eventId: "event-2", submissionId: "submission-2" }),
+        directSessionTask,
+        task({ id: "task-other-event", eventId: "event-2" }),
+        task({ id: "task-other-participant", participantId: "participant-marcus" }),
       ],
-      outstandingTaskCount: 2,
+      outstandingTaskCount: 3,
       assets: [
         {
-          id: "asset-unscoped",
+          id: "asset-session",
           eventId: "event-1",
           participantId: "participant-priya",
-          submissionId: "submission-1",
+          taskId: directSessionTask.id,
+          sessionId: "program-session-1",
           kind: "slides",
           fileName: "slides.pdf",
           contentType: "application/pdf",
@@ -466,21 +456,14 @@ describe("speaker portal view model", () => {
           createdAt: "2026-08-09T00:00:00.000Z",
         },
       ],
-      roster: {
-        organizationId: "organization-1",
-        eventId: "event-1",
-        submissionId: "submission-1",
-        capabilities: { manage: false, invite: false },
-        members: [],
-      },
     };
 
     expect(scopePortalContextToPrimaryParticipant(context).submissionIds).toEqual([]);
     expect(scopePortalViewToPrimaryParticipant(view, context)).toMatchObject({
       submissions: [],
-      tasks: [],
-      assets: [],
-      outstandingTaskCount: 0,
+      tasks: [expect.objectContaining({ id: directSessionTask.id })],
+      assets: [expect.objectContaining({ id: "asset-session" })],
+      outstandingTaskCount: 1,
     });
   });
 

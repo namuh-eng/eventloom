@@ -50,7 +50,7 @@ const transitionTaskSchema = z.object({
 
 const uploadSchema = z.object({
   participantId: z.string().trim().min(1),
-  submissionId: z.string().trim().min(1).optional(),
+  sessionId: z.string().trim().min(1).optional(),
   taskId: z.string().trim().min(1).optional(),
   kind: z.enum(["headshot", "slides", "supporting_file"]),
   fileName: z.string(),
@@ -63,7 +63,7 @@ const uploadSchema = z.object({
 const organizerHeadshotUploadSchema = z
   .object({
     participantId: z.string().trim().min(1).max(200),
-    submissionId: z.string().trim().min(1).max(200).optional(),
+    sessionId: z.string().trim().min(1).max(200).optional(),
     kind: z.literal("headshot"),
     fileName: z.string().trim().min(1).max(120),
     contentType: z.enum(["image/jpeg", "image/png", "image/webp"]),
@@ -134,7 +134,10 @@ const organizerTaskCreateSchema = z.object({
     .array(
       z.object({
         participantId: z.string().trim().min(1),
-        submissionId: z.string().trim().min(1).nullable(),
+        subject: z.discriminatedUnion("type", [
+          z.object({ type: z.literal("participant") }),
+          z.object({ type: z.literal("session"), sessionId: z.string().trim().min(1) }),
+        ]),
       }),
     )
     .min(1),
@@ -452,7 +455,13 @@ export function createSpeakerRoutes(dependencies: SpeakerRouteDependencies) {
       ...(body.reminderOffsetsMinutes === undefined
         ? {}
         : { reminderOffsetsMinutes: body.reminderOffsetsMinutes }),
-      assignments: body.assignments,
+      assignments: body.assignments.map(({ participantId, subject }) => ({
+        participantId,
+        subject:
+          subject.type === "participant"
+            ? { type: "participant" }
+            : { type: "session", sessionId: subject.sessionId },
+      })),
     });
     const task = tasks[0];
     return context.json({ data: task, items: tasks }, 201);
@@ -681,7 +690,7 @@ export function createSpeakerRoutes(dependencies: SpeakerRouteDependencies) {
       eventId: context.req.param("eventId"),
       accountId: context.get("speakerAccountId"),
       participantId: context.req.param("participantId"),
-      ...(body.submissionId === undefined ? {} : { submissionId: body.submissionId }),
+      ...(body.sessionId === undefined ? {} : { sessionId: body.sessionId }),
       ...(body.supersedesAssetId === undefined
         ? {}
         : {
@@ -842,7 +851,13 @@ export function createSpeakerRoutes(dependencies: SpeakerRouteDependencies) {
       ...(body.reminderOffsetsMinutes === undefined
         ? {}
         : { reminderOffsetsMinutes: body.reminderOffsetsMinutes }),
-      assignments: body.assignments,
+      assignments: body.assignments.map(({ participantId, subject }) => ({
+        participantId,
+        subject:
+          subject.type === "participant"
+            ? { type: "participant" }
+            : { type: "session", sessionId: subject.sessionId },
+      })),
     });
     return context.json({ data: tasks[0], items: tasks }, 201);
   });
@@ -1195,7 +1210,7 @@ export function createSpeakerRoutes(dependencies: SpeakerRouteDependencies) {
       accountId: context.get("speakerAccountId"),
       participantId: context.req.param("participantId"),
       organizer: false,
-      ...(body.submissionId === undefined ? {} : { submissionId: body.submissionId }),
+      ...(body.sessionId === undefined ? {} : { sessionId: body.sessionId }),
       ...(body.supersedesAssetId === undefined
         ? {}
         : {
@@ -1313,7 +1328,7 @@ export function createSpeakerRoutes(dependencies: SpeakerRouteDependencies) {
       eventId: context.req.param("eventId"),
       accountId: context.get("speakerAccountId"),
       participantId: body.participantId,
-      ...(body.submissionId === undefined ? {} : { submissionId: body.submissionId }),
+      ...(body.sessionId === undefined ? {} : { sessionId: body.sessionId }),
       ...(body.taskId === undefined ? {} : { taskId: body.taskId }),
       kind: body.kind,
       fileName: body.fileName,
@@ -1528,7 +1543,10 @@ const canonicalTaskSchema = z.object({
     .array(
       z.object({
         participantId: z.string().trim().min(1),
-        submissionId: z.string().trim().min(1).nullable(),
+        subject: z.discriminatedUnion("type", [
+          z.object({ type: z.literal("participant") }),
+          z.object({ type: z.literal("session"), sessionId: z.string().trim().min(1) }),
+        ]),
       }),
     )
     .min(1)
@@ -1949,6 +1967,13 @@ export function createSpeakerTaskAdminRoutes(dependencies: SpeakerRouteDependenc
       eventId: requiredSpeakerParam(context, "eventId"),
       accountId: context.get("speakerAccountId"),
       ...body,
+      assignments: body.assignments.map(({ participantId, subject }) => ({
+        participantId,
+        subject:
+          subject.type === "participant"
+            ? { type: "participant" }
+            : { type: "session", sessionId: subject.sessionId },
+      })),
     });
     return context.json({ data }, 201);
   });

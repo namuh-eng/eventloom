@@ -41,6 +41,68 @@ const stringValue = (value: unknown): string => String(value);
 const nullableString = (value: unknown): string | null => (value == null ? null : String(value));
 const numberValue = (value: unknown): number => Number(value);
 
+function speakerProjectionStatements(
+  database: D1Database,
+  projection: CrmEventProjection,
+  contact: CrmContact,
+): readonly D1PreparedStatement[] {
+  const displayParts = contact.displayName.trim().split(/\s+/u).filter(Boolean);
+  const firstName = contact.firstName?.trim() || displayParts[0] || contact.displayName;
+  const lastName = contact.lastName?.trim() || displayParts.slice(1).join(" ");
+  const biographyValue = contact.customFields.biography ?? contact.customFields.bio;
+  const biography = typeof biographyValue === "string" ? biographyValue : (contact.notes ?? "");
+  const socialLinks = {
+    ...(contact.website === null ? {} : { website: contact.website }),
+    ...(contact.linkedinUrl === null ? {} : { linkedin: contact.linkedinUrl }),
+  };
+  const profileId = `profile:${projection.eventId}:${projection.participantId}`;
+  return [
+    statement(
+      database,
+      `INSERT OR IGNORE INTO participants
+       (id,organization_id,event_id,first_name,last_name,display_name,email,normalized_email,identity_state,source_type,source_id,claimed_user_id,version,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?, 'resolved','crm',?,NULL,1,?,?)`,
+      [
+        projection.participantId,
+        projection.organizationId,
+        projection.eventId,
+        firstName,
+        lastName,
+        contact.displayName,
+        contact.email,
+        contact.email?.trim().toLowerCase() ?? null,
+        contact.id,
+        projection.createdAt,
+        projection.updatedAt,
+      ],
+    ),
+    statement(
+      database,
+      `INSERT OR IGNORE INTO speaker_profiles
+       (id,organization_id,event_id,participant_id,display_name,email,job_title,company,status,biography,social_links_json,travel_required,arrival_at,departure_at,accommodation,dietary_requirements,accessibility_needs,travel_notes,headshot_asset_id,source_type,source_id,version,created_at,updated_at,admitted_by_account_id,admitted_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,0,NULL,NULL,'','','','',NULL,'crm',?,1,?,?,?,?)`,
+      [
+        profileId,
+        projection.organizationId,
+        projection.eventId,
+        projection.participantId,
+        contact.displayName,
+        contact.email,
+        contact.title ?? "",
+        contact.company ?? "",
+        "pending",
+        biography,
+        json(socialLinks),
+        contact.id,
+        projection.createdAt,
+        projection.updatedAt,
+        projection.createdBy,
+        projection.createdAt,
+      ],
+    ),
+  ];
+}
+
 function contactFromRow(row: Row, tags: readonly string[] = []): CrmContact {
   return {
     id: stringValue(row.id),
@@ -829,7 +891,18 @@ export class D1CrmRepository implements CrmRepository {
         projection.participantId,
       ],
     ).first<Row>();
-    if (existing !== null) return projectionFromRow(existing);
+    if (existing !== null) {
+      const saved = projectionFromRow(existing);
+      await batch(this.database, [
+        guard(
+          this.database,
+          "EXISTS (SELECT 1 FROM crm_contacts WHERE organization_id=? AND id=?) AND EXISTS (SELECT 1 FROM events WHERE organization_id=? AND id=?)",
+          [saved.organizationId, saved.crmContactId, saved.organizationId, saved.eventId],
+        ),
+        ...speakerProjectionStatements(this.database, saved, contact),
+      ]);
+      return saved;
+    }
     try {
       await batch(this.database, [
         guard(
@@ -861,6 +934,7 @@ export class D1CrmRepository implements CrmRepository {
             projection.updatedAt,
           ],
         ),
+        ...speakerProjectionStatements(this.database, projection, contact),
         ...consequentialStatements(this.database, {
           tenantId: projection.organizationId,
           eventId: projection.eventId,
@@ -879,7 +953,7 @@ export class D1CrmRepository implements CrmRepository {
         projection.eventId,
         projection.crmContactId,
       );
-      if (concurrent !== null) return concurrent;
+      if (concurrent !== null) return this.saveProjection(concurrent, contact);
       throw this.conflict(error, "The event projection could not be saved.");
     }
     return projection;

@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOrganizerEventId } from "@/features/admin/organizer-event-workspace";
+import type { NavigationDataCache } from "@/lib/navigation-data-cache";
+import { useNavigationDataCache } from "@/lib/navigation-data-cache-provider";
 import {
   createEventSettingsApi,
   type EventIdentity,
@@ -20,7 +22,6 @@ import {
   eventSettingsWorkspaceScopeKey,
   loadEventSettingsProgressively,
   normalizeData,
-  persistEventSettingsMutation,
 } from "./event-settings-workspace-model";
 import { EventSettingsWorkspaceView } from "./event-settings-workspace-views";
 
@@ -86,7 +87,23 @@ function messageFrom(error: unknown): string {
   if (error instanceof Error) return error.message;
   return "The event settings request could not be completed.";
 }
-type PersistMutation = (operation: () => Promise<void>, successMessage: string) => Promise<void>;
+export function invalidateAgendaCatalogAfterEventSettingsMutation(
+  cache: NavigationDataCache | null,
+  eventId: string,
+): void {
+  cache?.invalidate([`agenda:${eventId.trim()}`]);
+}
+export function eventSettingsMutationInvalidatesAgendaCatalog(
+  resourceKind?: EventSettingsResourceKind,
+): boolean {
+  return resourceKind === undefined || resourceKind === "track" || resourceKind === "format";
+}
+
+type PersistMutation = (
+  operation: () => Promise<void>,
+  successMessage: string,
+  invalidateAgendaCatalog?: boolean,
+) => Promise<void>;
 
 function createEventSettingsWorkspaceActions(
   api: EventSettingsApi | null,
@@ -95,28 +112,44 @@ function createEventSettingsWorkspaceActions(
 ): EventSettingsWorkspaceActions {
   return {
     updateSettings: async (input) => {
-      await mutate(async () => {
-        if (!api) return;
-        await api.updateSettings(eventId, input);
-      }, "Session settings saved and the change was audited.");
+      await mutate(
+        async () => {
+          if (!api) return;
+          await api.updateSettings(eventId, input);
+        },
+        "Session settings saved and the change was audited.",
+        true,
+      );
     },
     createRoom: async (input) => {
-      await mutate(async () => {
-        if (!api) return;
-        await api.createRoom(eventId, input);
-      }, "Room created.");
+      await mutate(
+        async () => {
+          if (!api) return;
+          await api.createRoom(eventId, input);
+        },
+        "Room created.",
+        true,
+      );
     },
     updateRoom: async (input) => {
-      await mutate(async () => {
-        if (!api) return;
-        await api.updateRoom(eventId, input);
-      }, "Room updated.");
+      await mutate(
+        async () => {
+          if (!api) return;
+          await api.updateRoom(eventId, input);
+        },
+        "Room updated.",
+        true,
+      );
     },
     deleteRoom: async (roomId, expectedVersion) => {
-      await mutate(async () => {
-        if (!api) return;
-        await api.deleteRoom(eventId, roomId, expectedVersion);
-      }, "Room deleted.");
+      await mutate(
+        async () => {
+          if (!api) return;
+          await api.deleteRoom(eventId, roomId, expectedVersion);
+        },
+        "Room deleted.",
+        true,
+      );
     },
     createResource: async (kind, input) => {
       await mutate(
@@ -125,6 +158,7 @@ function createEventSettingsWorkspaceActions(
           await api.createResource(eventId, kind, input);
         },
         `${kind.charAt(0).toUpperCase() + kind.slice(1)} created.`,
+        eventSettingsMutationInvalidatesAgendaCatalog(kind),
       );
     },
     updateResource: async (kind, input) => {
@@ -134,6 +168,7 @@ function createEventSettingsWorkspaceActions(
           await api.updateResource(eventId, kind, input);
         },
         `${kind.charAt(0).toUpperCase() + kind.slice(1)} updated.`,
+        eventSettingsMutationInvalidatesAgendaCatalog(kind),
       );
     },
     deleteResource: async (kind, resourceId, expectedVersion) => {
@@ -143,6 +178,7 @@ function createEventSettingsWorkspaceActions(
           await api.deleteResource(eventId, kind, resourceId, expectedVersion);
         },
         `${kind.charAt(0).toUpperCase() + kind.slice(1)} deleted.`,
+        eventSettingsMutationInvalidatesAgendaCatalog(kind),
       );
     },
   };
@@ -169,6 +205,7 @@ function ScopedEventSettingsWorkspace({
   initialData,
 }: Readonly<EventSettingsWorkspaceProps>) {
   const navigationCache = useEventSettingsNavigationCache();
+  const agendaNavigationCache = useNavigationDataCache();
   const cacheScope = useMemo(() => ({ organizationId, eventId }), [eventId, organizationId]);
   const initialCacheSnapshot = useMemo(
     () => navigationCache?.get(cacheScope),
@@ -396,7 +433,11 @@ function ScopedEventSettingsWorkspace({
     organizationId,
   ]);
 
-  async function mutate(operation: () => Promise<void>, successMessage: string): Promise<void> {
+  async function mutate(
+    operation: () => Promise<void>,
+    successMessage: string,
+    invalidateAgendaCatalog = false,
+  ): Promise<void> {
     if (!currentData || !mountedRef.current) return;
     navigationCache?.invalidate(cacheScope);
     if (!api) {
@@ -408,7 +449,17 @@ function ScopedEventSettingsWorkspace({
     setBusy(true);
     setNotice(null);
     try {
-      const outcome = await persistEventSettingsMutation(operation, refresh);
+      await operation();
+      if (invalidateAgendaCatalog) {
+        invalidateAgendaCatalogAfterEventSettingsMutation(agendaNavigationCache, eventId);
+      }
+      let outcome: "refreshed" | "refresh-failed";
+      try {
+        await refresh();
+        outcome = "refreshed";
+      } catch {
+        outcome = "refresh-failed";
+      }
       if (!mountedRef.current) return;
       setNotice(
         outcome === "refreshed"

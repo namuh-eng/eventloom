@@ -20,10 +20,12 @@ import {
   scopePortalContextToAuthorizedParticipants,
   scopePortalViewToAuthorizedParticipants,
 } from "./model";
+import { resolvePortalAssetFamily } from "./portal-assets";
 import type { ParticipantSafeGuideFailure, PortalPrefetchResult } from "./portal-provider-model";
 import {
   acceptedSubmissionId,
   assetBelongsToPortalContext,
+  assetFamilyCommentResponseAuthorized,
   assetIdAuthorized,
   createPortalProviderApi,
   hasPortalCapability,
@@ -68,6 +70,170 @@ import type {
   PortalView,
   PortalWikiPage,
 } from "./types";
+
+type WorkspaceReplacementTuple = {
+  readonly predecessor: PortalAsset;
+  readonly sessionId: string | undefined;
+  readonly taskId: string | undefined;
+  readonly versionFamilyId: string;
+  readonly expectedLatestVersion: number;
+  readonly successorVersion: number;
+  readonly predecessorCurrentVersionId: string | null | undefined;
+  readonly predecessorApprovedVersionId: string | null | undefined;
+  readonly predecessorReleasedVersionId: string | null | undefined;
+};
+
+export function isOptionalGuideReadFailure(error: unknown): boolean {
+  if (!(error instanceof PortalApiError)) return true;
+  return (
+    error.code !== "CONTEXT_MISMATCH" &&
+    (error.status === 404 || error.status === 408 || error.status === 429 || error.status >= 500)
+  );
+}
+export function isOptionalWorkspaceSubreadFailure(error: unknown): boolean {
+  return (
+    error instanceof PortalApiError &&
+    error.code !== "CONTEXT_MISMATCH" &&
+    (error.status === 404 || error.status === 408 || error.status === 429 || error.status >= 500)
+  );
+}
+export function shouldIsolateWorkspaceReadFailure(
+  endpoint: "authority" | "guide" | "optional",
+  error: unknown,
+): boolean {
+  return (
+    (endpoint === "guide" && isOptionalGuideReadFailure(error)) ||
+    (endpoint === "optional" && isOptionalWorkspaceSubreadFailure(error))
+  );
+}
+
+export function workspaceReplacementTuple(
+  assets: readonly PortalAsset[],
+  predecessorId: string,
+): WorkspaceReplacementTuple | null {
+  const predecessor = assets.find((asset) => asset.id === predecessorId);
+  if (!predecessor || predecessor.versionFamilyId === undefined) return null;
+  const versionFamilyId = predecessor.versionFamilyId;
+  const family = assets.filter((asset) => asset.versionFamilyId === versionFamilyId);
+  const resolution = resolvePortalAssetFamily(family, predecessor);
+  const head = resolution.latest;
+  const version = head?.version;
+  if (
+    (resolution.status !== "ready" && resolution.status !== "rejected") ||
+    resolution.pointers.status !== "ready" ||
+    resolution.pointers.latestVersionId !== predecessor.id ||
+    head?.id !== predecessor.id ||
+    head.versionId !== head.id ||
+    head.latestVersionId !== head.id ||
+    (head.state === "ready" && head.currentVersionId !== head.id) ||
+    !Number.isSafeInteger(version) ||
+    version === undefined ||
+    version < 1
+  ) {
+    return null;
+  }
+  return {
+    predecessor: head,
+    sessionId: head.sessionId,
+    taskId: head.taskId,
+    versionFamilyId,
+    expectedLatestVersion: version,
+    successorVersion: version + 1,
+    predecessorCurrentVersionId: head.currentVersionId,
+    predecessorApprovedVersionId: head.approvedVersionId,
+    predecessorReleasedVersionId: head.releasedVersionId,
+  };
+}
+
+function assetMatchesWorkspaceReplacement(
+  asset: PortalAsset,
+  tuple: WorkspaceReplacementTuple,
+  input: {
+    readonly eventId: string;
+    readonly participantId: string;
+    readonly sessionId: string | undefined;
+    readonly kind: PortalAsset["kind"];
+    readonly state: PortalAsset["state"];
+  },
+): boolean {
+  return (
+    asset.id !== tuple.predecessor.id &&
+    asset.eventId === input.eventId &&
+    asset.participantId === input.participantId &&
+    asset.sessionId === input.sessionId &&
+    asset.taskId === tuple.taskId &&
+    asset.kind === input.kind &&
+    asset.state === input.state &&
+    asset.versionFamilyId === tuple.versionFamilyId &&
+    asset.supersedesAssetId === tuple.predecessor.id &&
+    asset.version === tuple.successorVersion &&
+    asset.versionId === asset.id &&
+    asset.latestVersionId === asset.id &&
+    asset.currentVersionId ===
+      (asset.state === "ready" ? asset.id : tuple.predecessorCurrentVersionId) &&
+    asset.approvedVersionId === tuple.predecessorApprovedVersionId &&
+    asset.releasedVersionId === tuple.predecessorReleasedVersionId
+  );
+}
+function assetMatchesInitialVersion(
+  asset: PortalAsset,
+  input: {
+    readonly eventId: string;
+    readonly participantId: string;
+    readonly sessionId: string | undefined;
+    readonly taskId: string | undefined;
+    readonly kind: PortalAsset["kind"];
+    readonly state: PortalAsset["state"];
+  },
+): boolean {
+  return (
+    asset.eventId === input.eventId &&
+    asset.participantId === input.participantId &&
+    asset.sessionId === input.sessionId &&
+    asset.taskId === input.taskId &&
+    asset.kind === input.kind &&
+    asset.state === input.state &&
+    asset.supersedesAssetId === undefined &&
+    asset.version === 1 &&
+    asset.versionId === asset.id &&
+    asset.versionFamilyId === asset.id &&
+    asset.latestVersionId === asset.id &&
+    (asset.state !== "ready" || asset.currentVersionId === asset.id)
+  );
+}
+export function assetMatchesPendingRetry(
+  asset: PortalAsset,
+  pending: PortalAsset,
+  input: {
+    readonly eventId: string;
+    readonly participantId: string;
+    readonly sessionId: string | undefined;
+    readonly taskId: string | undefined;
+    readonly kind: PortalAsset["kind"];
+    readonly state: "pending_upload" | "ready";
+  },
+): boolean {
+  return (
+    pending.state === "pending_upload" &&
+    pending.versionId === pending.id &&
+    pending.latestVersionId === pending.id &&
+    asset.id === pending.id &&
+    asset.eventId === input.eventId &&
+    asset.participantId === input.participantId &&
+    asset.sessionId === input.sessionId &&
+    asset.taskId === input.taskId &&
+    asset.kind === input.kind &&
+    asset.state === input.state &&
+    asset.version === pending.version &&
+    asset.versionId === pending.versionId &&
+    asset.versionFamilyId === pending.versionFamilyId &&
+    asset.supersedesAssetId === pending.supersedesAssetId &&
+    asset.latestVersionId === pending.latestVersionId &&
+    asset.currentVersionId === (input.state === "ready" ? pending.id : pending.currentVersionId) &&
+    asset.approvedVersionId === pending.approvedVersionId &&
+    asset.releasedVersionId === pending.releasedVersionId
+  );
+}
 
 export interface PortalWorkspaceState {
   rosters: Record<string, PortalRosterEnvelope>;
@@ -506,7 +672,7 @@ interface PortalContextValue {
   removeRosterEntry(input: { submissionId: string; participantId: string }): Promise<boolean>;
   uploadWorkspaceFile(input: {
     participantId: string;
-    submissionId?: string;
+    sessionId?: string;
     taskId?: string;
     kind: "headshot" | "slides" | "supporting_file";
     file: File;
@@ -601,6 +767,9 @@ function usePortalProviderValue({
   const authoritativeViewRef = useRef<PortalView | null>(null);
   const loadGeneration = useRef(0);
   const profileMutationIdRef = useRef(0);
+  const assetCommentRequestsRef = useRef(
+    new Map<string, { token: number; controller: AbortController }>(),
+  );
 
   const eventId = context?.eventId ?? "";
   const eventQuery = eventId ? `?event=${encodeURIComponent(eventId)}` : "";
@@ -614,6 +783,13 @@ function usePortalProviderValue({
 
   const clearWorkspace = useCallback(() => {
     workspaceDispatch({ type: "reset" });
+  }, []);
+  const clearMutationError = useCallback(() => {
+    asyncDispatch({ type: "mutation-error-set", error: null });
+  }, []);
+
+  const clearWorkspaceError = useCallback(() => {
+    workspaceDispatch({ type: "error-set", error: null });
   }, []);
 
   const loadWorkspaceFor = useCallback(
@@ -639,7 +815,6 @@ function usePortalProviderValue({
           resources: null,
           wiki: null,
         };
-        const failures: unknown[] = [];
         const formTasks = nextView.tasks.filter(
           (task) => task.type === "form" && taskBelongsToPortalContext(task, target),
         );
@@ -647,14 +822,15 @@ function usePortalProviderValue({
         const safely = async <T,>(
           operation: () => Promise<T>,
           fallback: T,
-          onFailure: (error: unknown) => void = (error) => failures.push(error),
+          endpoint: "authority" | "guide" | "optional" = "authority",
+          onFailure: (error: unknown) => void = () => undefined,
         ): Promise<T> => {
           try {
             return await operation();
           } catch (operationError) {
-            if (!isAbort(operationError)) {
-              onFailure(operationError);
-            }
+            if (isAbort(operationError)) return fallback;
+            if (!shouldIsolateWorkspaceReadFailure(endpoint, operationError)) throw operationError;
+            onFailure(operationError);
             return fallback;
           }
         };
@@ -708,6 +884,7 @@ function usePortalProviderValue({
               ? safely(
                   () => listResources(target.eventId, signal),
                   [] as PortalResource[],
+                  "guide",
                   (resourceError) => {
                     nextGuideErrors.resources = participantSafeGuideFailure(
                       resourceError,
@@ -725,6 +902,7 @@ function usePortalProviderValue({
               ? safely(
                   () => listWiki(target.eventId, signal),
                   [] as PortalWikiPage[],
+                  "guide",
                   (wikiError) => {
                     nextGuideErrors.wiki = participantSafeGuideFailure(wikiError, "wiki");
                   },
@@ -755,6 +933,7 @@ function usePortalProviderValue({
                             return result;
                           },
                           undefined as PortalTaskForm | undefined,
+                          "optional",
                         )
                       : Promise.resolve(undefined as PortalTaskForm | undefined),
                     api.getTaskResponse
@@ -776,6 +955,7 @@ function usePortalProviderValue({
                             return result;
                           },
                           null as PortalTaskResponseEnvelope | null,
+                          "optional",
                         )
                       : Promise.resolve(null as PortalTaskResponseEnvelope | null),
                   ]);
@@ -797,7 +977,11 @@ function usePortalProviderValue({
           wikiLoad,
           taskLoad,
         ]);
-        failures.push(...rosterLoadResult.failures);
+        const fatalRosterFailure = rosterLoadResult.failures.find(
+          (rosterFailure) =>
+            !isAbort(rosterFailure) && !isOptionalWorkspaceSubreadFailure(rosterFailure),
+        );
+        if (fatalRosterFailure !== undefined) throw fatalRosterFailure;
         for (const [submissionId, roster] of rosterLoadResult.entries) {
           nextWorkspace.rosters[submissionId] = roster;
         }
@@ -819,8 +1003,9 @@ function usePortalProviderValue({
         }
         workspaceDispatch({ type: "workspace-set", workspace: nextWorkspace });
         workspaceDispatch({ type: "guide-errors-set", guideErrors: nextGuideErrors });
-        if (failures.length > 0) {
-          workspaceDispatch({ type: "error-set", error: messageFrom(failures[0]) });
+      } catch (loadError) {
+        if (!isAbort(loadError) && isPortalGenerationCurrent(generation, loadGeneration.current)) {
+          workspaceDispatch({ type: "error-set", error: messageFrom(loadError) });
         }
       } finally {
         if (isPortalGenerationCurrent(generation, loadGeneration.current)) {
@@ -992,6 +1177,8 @@ function usePortalProviderValue({
     return () => {
       controller.abort();
       loadGeneration.current += 1;
+      for (const request of assetCommentRequestsRef.current.values()) request.controller.abort();
+      assetCommentRequestsRef.current.clear();
     };
   }, [loadInitial]);
 
@@ -1149,41 +1336,110 @@ function usePortalProviderValue({
       try {
         let finalizedHeadshot: PortalAsset | undefined;
         if (input.headshot && api.uploadFile && api.finalizeAsset) {
-          const supersededHeadshot = input.profile.headshotAssetId
-            ? (() => {
-                const referenced = view?.assets?.find(
-                  (asset) => asset.id === input.profile.headshotAssetId,
+          const knownAssets = [
+            ...new Map(
+              [...workspace.assets, ...(view?.assets ?? [])].map((asset) => [asset.id, asset]),
+            ).values(),
+          ];
+          const referenceId =
+            typeof input.profile.headshotAssetId === "string"
+              ? input.profile.headshotAssetId
+              : undefined;
+          const referenced =
+            referenceId === undefined
+              ? undefined
+              : knownAssets.find((asset) => asset.id === referenceId);
+          const headshotRows = knownAssets.filter(
+            (asset) =>
+              asset.eventId === targetContext.eventId &&
+              asset.participantId === activeParticipantId &&
+              asset.kind === "headshot" &&
+              asset.sessionId === undefined &&
+              asset.taskId === undefined,
+          );
+          const familyIds = new Set(
+            headshotRows.flatMap((asset) =>
+              asset.versionFamilyId === undefined ? [] : [asset.versionFamilyId],
+            ),
+          );
+          const headshotFamilyMalformed = headshotRows.some(
+            (asset) => asset.versionFamilyId === undefined,
+          );
+          const familySeed =
+            referenced ??
+            (familyIds.size === 1
+              ? headshotRows.find((asset) => asset.versionFamilyId === [...familyIds][0])
+              : undefined);
+          const familyRows =
+            familySeed?.versionFamilyId === undefined
+              ? []
+              : headshotRows.filter(
+                  (asset) => asset.versionFamilyId === familySeed.versionFamilyId,
                 );
-                if (referenced === undefined) return undefined;
-                const familyId = referenced.versionFamilyId ?? referenced.id;
-                return (view?.assets ?? [])
-                  .filter(
-                    (asset) =>
-                      (asset.versionFamilyId ?? asset.id) === familyId &&
-                      (asset.state === "ready" || asset.state === "rejected") &&
-                      Number.isSafeInteger(asset.version) &&
-                      (asset.version ?? 0) > 0,
-                  )
-                  .sort((left, right) => (right.version ?? 1) - (left.version ?? 1))[0];
-              })()
-            : undefined;
+          const familyResolution =
+            familySeed === undefined ? null : resolvePortalAssetFamily(familyRows, familySeed);
+          const authoritativeHead =
+            familyResolution !== null &&
+            (familyResolution.status === "ready" || familyResolution.status === "rejected") &&
+            familyResolution.pointers.status === "ready"
+              ? familyResolution.latest
+              : undefined;
+          const replacement =
+            headshotRows.length === 0
+              ? undefined
+              : authoritativeHead === undefined
+                ? null
+                : workspaceReplacementTuple(knownAssets, authoritativeHead.id);
+          if (
+            (referenceId !== undefined &&
+              (referenced === undefined ||
+                !headshotRows.some((asset) => asset.id === referenced.id))) ||
+            familyIds.size > 1 ||
+            headshotFamilyMalformed ||
+            (headshotRows.length > 0 && replacement === null)
+          ) {
+            throw new PortalApiError(
+              "CONTEXT_MISMATCH",
+              "The existing headshot does not have authoritative version metadata.",
+              409,
+            );
+          }
+          const replacementTuple = replacement ?? undefined;
+          const headshotInput = {
+            eventId: targetContext.eventId,
+            participantId: activeParticipantId,
+            sessionId: undefined,
+            taskId: undefined,
+            kind: "headshot" as const,
+          };
           asyncDispatch({ type: "profile-mutation-set", phase: "pending" });
           const pending = await api.uploadFile({
             eventId: targetContext.eventId,
             participantId: activeParticipantId,
             kind: "headshot",
             file: input.headshot,
-            ...(supersededHeadshot
-              ? {
-                  supersedesAssetId: supersededHeadshot.id,
-                  expectedLatestVersion: supersededHeadshot.version,
-                }
-              : {}),
+            ...(replacementTuple === undefined
+              ? {}
+              : {
+                  supersedesAssetId: replacementTuple.predecessor.id,
+                  expectedLatestVersion: replacementTuple.expectedLatestVersion,
+                }),
           });
-          if (!profileAssetBelongsToPortalContext(pending, targetContext)) {
+          if (
+            (replacementTuple === undefined &&
+              !assetMatchesInitialVersion(pending, {
+                ...headshotInput,
+                state: "pending_upload",
+              })) ||
+            (replacementTuple !== undefined &&
+              !assetMatchesWorkspaceReplacement(pending, replacementTuple, {
+                ...headshotInput,
+                state: "pending_upload",
+              }))
+          ) {
             throw new PortalApiError(
               "CONTEXT_MISMATCH",
-              "The headshot upload belongs to a different event or participant.",
+              "The headshot upload lineage is invalid.",
               409,
             );
           }
@@ -1194,12 +1450,21 @@ function usePortalProviderValue({
           });
           if (
             finalizedHeadshot.id !== pending.id ||
-            !profileAssetBelongsToPortalContext(finalizedHeadshot, targetContext) ||
-            finalizedHeadshot.state !== "ready"
+            (replacementTuple === undefined &&
+              !assetMatchesInitialVersion(finalizedHeadshot, {
+                ...headshotInput,
+                state: "ready",
+              })) ||
+            (replacementTuple !== undefined &&
+              !assetMatchesWorkspaceReplacement(finalizedHeadshot, replacementTuple, {
+                ...headshotInput,
+                state: "ready",
+              })) ||
+            !profileAssetBelongsToPortalContext(finalizedHeadshot, targetContext)
           ) {
             throw new PortalApiError(
               "CONTEXT_MISMATCH",
-              "The finalized headshot belongs to a different event or participant.",
+              "The finalized headshot does not preserve its authoritative version family.",
               409,
             );
           }
@@ -1281,7 +1546,7 @@ function usePortalProviderValue({
         }
       }
     },
-    [api, can, context, contexts, hydrate, selectedParticipantId, view],
+    [api, can, context, contexts, hydrate, selectedParticipantId, view, workspace.assets],
   );
 
   const transitionTask = useCallback(
@@ -1371,11 +1636,20 @@ function usePortalProviderValue({
         });
         return false;
       }
+      const authoritativeTask = view?.tasks.find((candidate) => candidate.id === task.id);
+      const sameSubject =
+        authoritativeTask?.subject.type === task.subject.type &&
+        (authoritativeTask?.subject.type === "participant" ||
+          (authoritativeTask?.subject.type === "session" &&
+            task.subject.type === "session" &&
+            authoritativeTask.subject.sessionId === task.subject.sessionId));
       if (
-        !taskBelongsToPortalContext(task, context) ||
-        !view?.tasks.some(
-          (candidate) => candidate.id === task.id && taskBelongsToPortalContext(candidate, context),
-        )
+        authoritativeTask === undefined ||
+        !taskBelongsToPortalContext(authoritativeTask, context) ||
+        authoritativeTask.type !== "upload" ||
+        authoritativeTask.eventId !== task.eventId ||
+        authoritativeTask.participantId !== task.participantId ||
+        !sameSubject
       ) {
         asyncDispatch({
           type: "mutation-error-set",
@@ -1383,7 +1657,7 @@ function usePortalProviderValue({
         });
         return false;
       }
-      const kind = task.acceptedAssetKinds?.[0];
+      const kind = authoritativeTask.acceptedAssetKinds?.[0];
       if (!kind) {
         asyncDispatch({
           type: "mutation-error-set",
@@ -1391,60 +1665,152 @@ function usePortalProviderValue({
         });
         return false;
       }
+      const taskSessionId =
+        authoritativeTask.subject.type === "session"
+          ? authoritativeTask.subject.sessionId
+          : undefined;
       const targetContext = context;
       const generation = loadGeneration.current;
-      const predecessor = (view?.assets ?? [])
-        .filter(
-          (asset) =>
-            asset.taskId === task.id &&
-            asset.kind === kind &&
-            (asset.state === "ready" || asset.state === "rejected") &&
-            Number.isSafeInteger(asset.version) &&
-            (asset.version ?? 0) > 0,
-        )
-        .sort((left, right) => (right.version ?? 1) - (left.version ?? 1))[0];
-      asyncDispatch({ type: "task-busy-set", taskId: task.id, busy: true });
+      const knownAssets = [
+        ...new Map(
+          [...workspace.assets, ...(view?.assets ?? [])].map((asset) => [asset.id, asset]),
+        ).values(),
+      ];
+      const matchingRows = knownAssets.filter(
+        (asset) =>
+          asset.taskId === authoritativeTask.id &&
+          asset.sessionId === taskSessionId &&
+          asset.kind === kind,
+      );
+      const taskFamilyIds = matchingRows.map((asset) => asset.versionFamilyId);
+      const uniqueTaskFamilyIds = new Set(
+        taskFamilyIds.filter((familyId): familyId is string => familyId !== undefined),
+      );
+      const taskFamilyMalformed =
+        matchingRows.some((asset) => asset.versionFamilyId === undefined) ||
+        uniqueTaskFamilyIds.size > 1;
+      const taskFamilyResolution =
+        matchingRows.length === 0 || taskFamilyMalformed
+          ? null
+          : resolvePortalAssetFamily(matchingRows, matchingRows[0]);
+      const pendingRetry =
+        taskFamilyResolution?.status === "pending" &&
+        taskFamilyResolution.pointers.status === "ready" &&
+        taskFamilyResolution.latest !== undefined
+          ? taskFamilyResolution.latest
+          : undefined;
+      const replacement =
+        taskFamilyResolution !== null &&
+        (taskFamilyResolution.status === "ready" || taskFamilyResolution.status === "rejected") &&
+        taskFamilyResolution.pointers.status === "ready" &&
+        taskFamilyResolution.latest !== undefined
+          ? workspaceReplacementTuple(knownAssets, taskFamilyResolution.latest.id)
+          : null;
+      if (
+        (matchingRows.length > 0 && pendingRetry === undefined && replacement === null) ||
+        (pendingRetry !== undefined && api.retryAssetUpload === undefined)
+      ) {
+        asyncDispatch({
+          type: "mutation-error-set",
+          error: "This task file has conflicting or incomplete version metadata.",
+        });
+        return false;
+      }
+      const replacementTuple = replacement ?? undefined;
+      const taskAssetInput = {
+        eventId: targetContext.eventId,
+        participantId: authoritativeTask.participantId,
+        sessionId: taskSessionId,
+        taskId: authoritativeTask.id,
+        kind,
+      };
+      asyncDispatch({ type: "task-busy-set", taskId: authoritativeTask.id, busy: true });
       asyncDispatch({ type: "mutation-error-set", error: null });
       try {
-        const uploaded = await api.uploadTaskFile({
-          eventId: targetContext.eventId,
-          participantId: task.participantId,
-          taskId: task.id,
-          kind,
-          file,
-          ...(predecessor === undefined
-            ? {}
-            : {
-                supersedesAssetId: predecessor.id,
-                expectedLatestVersion: predecessor.version ?? 1,
-              }),
-        });
-        const finalized = await api.finalizeAsset({
-          eventId: targetContext.eventId,
-          assetId: uploaded.assetId,
-          state: "ready",
-        });
+        const uploaded =
+          pendingRetry !== undefined && api.retryAssetUpload !== undefined
+            ? await api.retryAssetUpload({
+                eventId: targetContext.eventId,
+                assetId: pendingRetry.id,
+                file,
+              })
+            : await api.uploadTaskFile({
+                eventId: targetContext.eventId,
+                participantId: authoritativeTask.participantId,
+                taskId: authoritativeTask.id,
+                ...(taskSessionId === undefined ? {} : { sessionId: taskSessionId }),
+                kind,
+                file,
+                ...(replacementTuple === undefined
+                  ? {}
+                  : {
+                      supersedesAssetId: replacementTuple.predecessor.id,
+                      expectedLatestVersion: replacementTuple.expectedLatestVersion,
+                    }),
+              });
         if (
-          finalized.eventId !== targetContext.eventId ||
-          finalized.participantId !== task.participantId ||
-          finalized.taskId !== task.id ||
-          finalized.state !== "ready" ||
-          !assetBelongsToPortalContext(finalized, targetContext, view?.tasks ?? [])
+          (pendingRetry !== undefined &&
+            !assetMatchesPendingRetry(uploaded, pendingRetry, {
+              ...taskAssetInput,
+              state: "pending_upload",
+            })) ||
+          (pendingRetry === undefined &&
+            replacementTuple === undefined &&
+            !assetMatchesInitialVersion(uploaded, {
+              ...taskAssetInput,
+              state: "pending_upload",
+            })) ||
+          (pendingRetry === undefined &&
+            replacementTuple !== undefined &&
+            !assetMatchesWorkspaceReplacement(uploaded, replacementTuple, {
+              ...taskAssetInput,
+              state: "pending_upload",
+            }))
         ) {
           throw new PortalApiError(
             "CONTEXT_MISMATCH",
-            "The finalized task file belongs to a different event, participant, or task.",
+            "The uploaded task file lineage is invalid.",
+            409,
+          );
+        }
+        const finalized = await api.finalizeAsset({
+          eventId: targetContext.eventId,
+          assetId: uploaded.id,
+          state: "ready",
+        });
+        if (
+          finalized.id !== uploaded.id ||
+          (pendingRetry !== undefined &&
+            (!assetMatchesPendingRetry(finalized, pendingRetry, {
+              ...taskAssetInput,
+              state: "ready",
+            }) ||
+              !assetBelongsToPortalContext(finalized, targetContext, view?.tasks ?? []))) ||
+          (pendingRetry === undefined &&
+            replacementTuple !== undefined &&
+            !assetMatchesWorkspaceReplacement(finalized, replacementTuple, {
+              ...taskAssetInput,
+              state: "ready",
+            })) ||
+          (pendingRetry === undefined &&
+            replacementTuple === undefined &&
+            (!assetMatchesInitialVersion(finalized, { ...taskAssetInput, state: "ready" }) ||
+              !assetBelongsToPortalContext(finalized, targetContext, view?.tasks ?? [])))
+        ) {
+          throw new PortalApiError(
+            "CONTEXT_MISMATCH",
+            "The finalized task file does not preserve the authoritative session and version family.",
             409,
           );
         }
         const updated = await api.transitionTask({
           eventId: targetContext.eventId,
-          taskId: task.id,
+          taskId: authoritativeTask.id,
           toStatus: "submitted",
-          expectedVersion: task.version,
+          expectedVersion: authoritativeTask.version,
           note: `Uploaded ${file.name}`,
         });
-        if (!taskMutationMatches(updated, task, targetContext.eventId, "submitted")) {
+        if (!taskMutationMatches(updated, authoritativeTask, targetContext.eventId, "submitted")) {
           throw new PortalApiError(
             "CONTEXT_MISMATCH",
             "The saved upload task does not match the active speaker or submitted status.",
@@ -1463,10 +1829,10 @@ function usePortalProviderValue({
         }
         return false;
       } finally {
-        asyncDispatch({ type: "task-busy-set", taskId: task.id, busy: false });
+        asyncDispatch({ type: "task-busy-set", taskId: authoritativeTask.id, busy: false });
       }
     },
-    [api, can, context, view],
+    [api, can, context, view, workspace.assets],
   );
 
   const addRosterEntry = useCallback(
@@ -1701,7 +2067,7 @@ function usePortalProviderValue({
   const uploadWorkspaceFile = useCallback(
     async (input: {
       participantId: string;
-      submissionId?: string;
+      sessionId?: string;
       taskId?: string;
       kind: "headshot" | "slides" | "supporting_file";
       file: File;
@@ -1714,7 +2080,7 @@ function usePortalProviderValue({
         });
         return false;
       }
-      if (!can("asset-write")) {
+      if (!can("asset-write") || !can("task-response")) {
         asyncDispatch({
           type: "mutation-error-set",
           error: "You do not have permission to upload files.",
@@ -1726,37 +2092,44 @@ function usePortalProviderValue({
         return false;
       }
       const targetContext = context;
-      const uploadSubmissionId =
-        input.submissionId === undefined
-          ? null
-          : acceptedSubmissionId(input.submissionId, context, view);
-      const inputTask =
-        input.taskId === undefined
-          ? undefined
-          : view?.tasks.find((task) => task.id === input.taskId);
-      const supersededAsset =
+      const uploadSessionId = input.sessionId;
+      const knownAssets = [
+        ...new Map(
+          [...workspace.assets, ...(view?.assets ?? [])].map((asset) => [asset.id, asset]),
+        ).values(),
+      ];
+      const replacement =
         input.supersedesAssetId === undefined
           ? undefined
-          : (workspace.assets.find((asset) => asset.id === input.supersedesAssetId) ??
-            view?.assets?.find((asset) => asset.id === input.supersedesAssetId));
+          : (workspaceReplacementTuple(knownAssets, input.supersedesAssetId) ?? undefined);
+      const taskId = input.taskId ?? replacement?.taskId;
+      const inputTask =
+        taskId === undefined ? undefined : view?.tasks.find((task) => task.id === taskId);
+      const isTasklessReplacement =
+        replacement !== undefined &&
+        replacement.taskId === undefined &&
+        taskId === undefined &&
+        replacement.predecessor.eventId === targetContext.eventId &&
+        replacement.predecessor.participantId === input.participantId &&
+        replacement.predecessor.kind === input.kind &&
+        replacement.sessionId === uploadSessionId &&
+        assetBelongsToPortalContext(replacement.predecessor, context, view?.tasks ?? []);
+      const isAuthorizedTaskUpload =
+        inputTask !== undefined &&
+        taskBelongsToPortalContext(inputTask, context) &&
+        inputTask.type === "upload" &&
+        inputTask.subject.type === "session" &&
+        inputTask.subject.sessionId === uploadSessionId &&
+        inputTask.acceptedAssetKinds?.includes(input.kind) &&
+        (replacement === undefined || replacement.taskId === inputTask.id);
       if (
         input.participantId !== context.primaryParticipantId ||
-        uploadSubmissionId === null ||
-        (input.taskId !== undefined &&
-          (inputTask === undefined || !taskBelongsToPortalContext(inputTask, context))) ||
-        (inputTask !== undefined &&
-          (inputTask.submissionId === null ||
-            !portalSubmissionIdsMatch(uploadSubmissionId, inputTask.submissionId))) ||
-        (input.supersedesAssetId !== undefined &&
-          (supersededAsset === undefined ||
-            !assetBelongsToPortalContext(supersededAsset, context, view?.tasks ?? []) ||
-            supersededAsset.submissionId === undefined ||
-            !portalSubmissionIdsMatch(uploadSubmissionId, supersededAsset.submissionId) ||
-            supersededAsset.kind !== input.kind))
+        uploadSessionId === undefined ||
+        (!isTasklessReplacement && !isAuthorizedTaskUpload)
       ) {
         asyncDispatch({
           type: "mutation-error-set",
-          error: "This file does not belong to the active speaker.",
+          error: "This file does not belong to an authorized session upload task.",
         });
         return false;
       }
@@ -1768,25 +2141,37 @@ function usePortalProviderValue({
         const pendingAsset = await api.uploadFile({
           eventId: targetContext.eventId,
           ...input,
-          submissionId: uploadSubmissionId,
-          ...(input.supersedesAssetId === undefined
+          ...(taskId === undefined ? {} : { taskId }),
+          sessionId: uploadSessionId,
+          ...(replacement === undefined
             ? {}
             : {
-                expectedLatestVersion: supersededAsset?.version ?? 1,
+                expectedLatestVersion: replacement.expectedLatestVersion,
               }),
         });
         if (
-          pendingAsset.state !== "pending_upload" ||
-          !assetBelongsToPortalContext(pendingAsset, targetContext, view?.tasks ?? []) ||
-          pendingAsset.participantId !== input.participantId ||
-          pendingAsset.submissionId === undefined ||
-          !portalSubmissionIdsMatch(pendingAsset.submissionId, uploadSubmissionId) ||
-          (input.taskId !== undefined && pendingAsset.taskId !== input.taskId) ||
-          pendingAsset.supersedesAssetId !== input.supersedesAssetId
+          (replacement === undefined &&
+            (!assetBelongsToPortalContext(pendingAsset, targetContext, view?.tasks ?? []) ||
+              !assetMatchesInitialVersion(pendingAsset, {
+                eventId: targetContext.eventId,
+                participantId: input.participantId,
+                sessionId: uploadSessionId,
+                taskId,
+                kind: input.kind,
+                state: "pending_upload",
+              }))) ||
+          (replacement !== undefined &&
+            !assetMatchesWorkspaceReplacement(pendingAsset, replacement, {
+              eventId: targetContext.eventId,
+              participantId: input.participantId,
+              sessionId: uploadSessionId,
+              kind: input.kind,
+              state: "pending_upload",
+            }))
         ) {
           throw new PortalApiError(
             "CONTEXT_MISMATCH",
-            "The file response belongs to a different speaker or session.",
+            "The file response does not preserve the requested version family.",
             409,
           );
         }
@@ -1797,12 +2182,28 @@ function usePortalProviderValue({
         });
         if (
           asset.id !== pendingAsset.id ||
-          asset.state !== "ready" ||
-          !assetBelongsToPortalContext(asset, targetContext, view?.tasks ?? [])
+          (replacement === undefined &&
+            (!assetBelongsToPortalContext(asset, targetContext, view?.tasks ?? []) ||
+              !assetMatchesInitialVersion(asset, {
+                eventId: targetContext.eventId,
+                participantId: input.participantId,
+                sessionId: uploadSessionId,
+                taskId,
+                kind: input.kind,
+                state: "ready",
+              }))) ||
+          (replacement !== undefined &&
+            !assetMatchesWorkspaceReplacement(asset, replacement, {
+              eventId: targetContext.eventId,
+              participantId: input.participantId,
+              sessionId: uploadSessionId,
+              kind: input.kind,
+              state: "ready",
+            }))
         ) {
           throw new PortalApiError(
             "CONTEXT_MISMATCH",
-            "The finalized file belongs to a different speaker or session.",
+            "The finalized file does not preserve the requested version family.",
             409,
           );
         }
@@ -1861,8 +2262,14 @@ function usePortalProviderValue({
           file: input.file,
         });
         if (
-          pendingAsset.id !== knownAsset.id ||
-          pendingAsset.state !== "pending_upload" ||
+          !assetMatchesPendingRetry(pendingAsset, knownAsset, {
+            eventId: targetContext.eventId,
+            participantId: knownAsset.participantId,
+            sessionId: knownAsset.sessionId,
+            taskId: knownAsset.taskId,
+            kind: knownAsset.kind,
+            state: "pending_upload",
+          }) ||
           pendingAsset.fileName !== knownAsset.fileName ||
           pendingAsset.contentType !== knownAsset.contentType ||
           pendingAsset.sizeBytes !== knownAsset.sizeBytes ||
@@ -1880,8 +2287,14 @@ function usePortalProviderValue({
           state: "ready",
         });
         if (
-          asset.id !== knownAsset.id ||
-          asset.state !== "ready" ||
+          !assetMatchesPendingRetry(asset, knownAsset, {
+            eventId: targetContext.eventId,
+            participantId: knownAsset.participantId,
+            sessionId: knownAsset.sessionId,
+            taskId: knownAsset.taskId,
+            kind: knownAsset.kind,
+            state: "ready",
+          }) ||
           !assetBelongsToPortalContext(asset, targetContext, view?.tasks ?? [])
         ) {
           throw new PortalApiError(
@@ -1946,8 +2359,14 @@ function usePortalProviderValue({
           state: "ready",
         });
         if (
-          asset.id !== input.assetId ||
-          asset.state !== "ready" ||
+          !assetMatchesPendingRetry(asset, knownAsset, {
+            eventId: targetContext.eventId,
+            participantId: knownAsset.participantId,
+            sessionId: knownAsset.sessionId,
+            taskId: knownAsset.taskId,
+            kind: knownAsset.kind,
+            state: "ready",
+          }) ||
           !assetBelongsToPortalContext(asset, targetContext, view?.tasks ?? [])
         ) {
           throw new PortalApiError(
@@ -2002,7 +2421,10 @@ function usePortalProviderValue({
         workspaceDispatch({ type: "asset-history-set", assetId, history });
         return history;
       } catch (historyError) {
-        if (isPortalGenerationCurrent(generation, loadGeneration.current)) {
+        if (
+          !isOptionalWorkspaceSubreadFailure(historyError) &&
+          isPortalGenerationCurrent(generation, loadGeneration.current)
+        ) {
           workspaceDispatch({ type: "error-set", error: messageFrom(historyError) });
         }
         return [];
@@ -2021,25 +2443,60 @@ function usePortalProviderValue({
         return [];
       }
       const generation = loadGeneration.current;
+      const previous = assetCommentRequestsRef.current.get(assetId);
+      previous?.controller.abort();
+      const request = {
+        token: (previous?.token ?? 0) + 1,
+        controller: new AbortController(),
+      };
+      assetCommentRequestsRef.current.set(assetId, request);
       try {
-        const comments = await api.listAssetComments(targetContext.eventId, assetId);
-        if (comments.some((comment) => comment.assetId !== assetId)) {
+        const comments = await api.listAssetComments(
+          targetContext.eventId,
+          assetId,
+          request.controller.signal,
+        );
+        if (
+          comments.some(
+            (comment) =>
+              !assetFamilyCommentResponseAuthorized(
+                assetId,
+                comment.assetId,
+                comment.versionId ?? "",
+                targetContext,
+                view,
+                workspace.assets,
+              ),
+          )
+        ) {
           throw new PortalApiError(
             "CONTEXT_MISMATCH",
-            "The file comments belong to a different file.",
+            "The file comments belong to a different file family.",
             409,
           );
         }
-        if (!isPortalGenerationCurrent(generation, loadGeneration.current)) {
+        if (
+          !isPortalGenerationCurrent(generation, loadGeneration.current) ||
+          assetCommentRequestsRef.current.get(assetId)?.token !== request.token
+        ) {
           return [];
         }
         workspaceDispatch({ type: "asset-comments-set", assetId, comments });
         return comments;
       } catch (commentsError) {
-        if (isPortalGenerationCurrent(generation, loadGeneration.current)) {
+        if (
+          !isAbort(commentsError) &&
+          !isOptionalWorkspaceSubreadFailure(commentsError) &&
+          isPortalGenerationCurrent(generation, loadGeneration.current) &&
+          assetCommentRequestsRef.current.get(assetId)?.token === request.token
+        ) {
           workspaceDispatch({ type: "error-set", error: messageFrom(commentsError) });
         }
         return [];
+      } finally {
+        if (assetCommentRequestsRef.current.get(assetId)?.token === request.token) {
+          assetCommentRequestsRef.current.delete(assetId);
+        }
       }
     },
     [api, can, context, view, workspace.assets],
@@ -2070,7 +2527,24 @@ function usePortalProviderValue({
       asyncDispatch({ type: "mutation-error-set", error: null });
       try {
         const comment = await api.addAssetComment({ eventId: targetContext.eventId, ...input });
-        if (comment.assetId !== input.assetId) {
+        const selectedAsset =
+          workspace.assets.find((asset) => asset.id === input.assetId) ??
+          view?.assets?.find((asset) => asset.id === input.assetId);
+        const commentVersionId = comment.versionId;
+        if (
+          selectedAsset === undefined ||
+          comment.assetId !== input.assetId ||
+          commentVersionId === undefined ||
+          commentVersionId !== (selectedAsset.versionId ?? selectedAsset.id) ||
+          !assetFamilyCommentResponseAuthorized(
+            input.assetId,
+            comment.assetId,
+            commentVersionId,
+            targetContext,
+            view,
+            workspace.assets,
+          )
+        ) {
           throw new PortalApiError(
             "CONTEXT_MISMATCH",
             "The file comment belongs to a different file.",
@@ -2311,8 +2785,8 @@ function usePortalProviderValue({
       loadTaskForm,
       loadTaskResponse,
       saveTaskResponse,
-      clearMutationError: () => asyncDispatch({ type: "mutation-error-set", error: null }),
-      clearWorkspaceError: () => workspaceDispatch({ type: "error-set", error: null }),
+      clearMutationError,
+      clearWorkspaceError,
     }),
     [
       addAssetComment,
@@ -2346,6 +2820,8 @@ function usePortalProviderValue({
       profileRevision,
       savingProfile,
       saveTaskResponse,
+      clearMutationError,
+      clearWorkspaceError,
       switchContext,
       switchParticipant,
       transitionTask,

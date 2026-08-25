@@ -167,13 +167,11 @@ const profile: DeliverableSpeakerProfile = {
 const task: DeliverableTask = {
   id: "task-1",
   eventId: "event-1",
-  submissionId: "submission-1",
   participantId: "speaker-1",
   sessionTitle: session.title,
   subject: {
     type: "session",
-    participantId: "speaker-1",
-    submissionId: "submission-1",
+    sessionId: session.id,
   },
   type: "upload",
   owner: "speaker",
@@ -193,7 +191,7 @@ const task: DeliverableTask = {
 const assetV1: DeliverableAsset = {
   id: "asset-1",
   eventId: "event-1",
-  submissionId: "submission-1",
+  sessionId: "session-priya",
   participantId: "speaker-1",
   taskId: "task-1",
   kind: "slides",
@@ -350,7 +348,12 @@ describe("deliverables API adapter", () => {
         dueAt: "2027-05-01",
         allowedMimeTypes: ["application/pdf"],
         maxSizeBytes: 5_000_000,
-        assignments: [{ participantId: "speaker-1", submissionId: "submission-1" }],
+        assignments: [
+          {
+            participantId: "speaker-1",
+            subject: { type: "session", sessionId: "session-priya" },
+          },
+        ],
         acceptedAssetKinds: ["slides"],
       }),
     ).resolves.toMatchObject({ id: task.id });
@@ -380,7 +383,12 @@ describe("deliverables API adapter", () => {
       allowedMimeTypes: ["application/pdf"],
       maxBytes: 5_000_000,
       acceptedAssetKinds: ["slides"],
-      assignments: [{ participantId: "speaker-1", submissionId: "submission-1" }],
+      assignments: [
+        {
+          participantId: "speaker-1",
+          subject: { type: "session", sessionId: "session-priya" },
+        },
+      ],
     });
     expect(String(calls[1]?.input)).toContain("/organizer/reminders/queue");
     expect(JSON.parse(String(calls[1]?.init?.body))).toMatchObject({
@@ -913,9 +921,15 @@ describe("deliverables core request starter", () => {
       status: "overdue",
     };
     const waitingRow: DeliverableRow = {
-      task: { ...task, id: "task-2", title: "Upload headshot", status: "not_started" },
-      session,
-      sessionLabel: session.title,
+      task: {
+        ...task,
+        id: "task-2",
+        title: "Upload headshot",
+        status: "not_started",
+        subject: { type: "participant" },
+      },
+      session: undefined,
+      sessionLabel: "Participant profile",
       speaker: profile,
       speakerLabel: profile.displayName,
       assets: [],
@@ -939,6 +953,15 @@ describe("deliverables core request starter", () => {
         status: "outstanding",
       }).map((candidate) => candidate.task.id),
     ).toEqual(["task-2"]);
+    expect(
+      filterContentRequestRows([row, waitingRow], {
+        query: "",
+        speakerId: "all",
+        sessionId: session.id,
+        taskId: "all",
+        status: "all",
+      }).map((candidate) => candidate.task.id),
+    ).toEqual(["task-1"]);
 
     const markup = renderToStaticMarkup(
       createElement(ContentRequestInspector, { row: waitingRow }),

@@ -4,8 +4,11 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
+  authorizedFilesSessionOptions,
+  compatibleFilesUploadTasks,
   EventGuideWorkspaceView,
   FilesWorkspaceView,
+  reconcileSelectedFileSessionId,
   SessionsWorkspaceView,
 } from "./portal-workspace";
 import type {
@@ -17,6 +20,7 @@ import type {
   PortalWikiPage,
 } from "./types";
 
+const canonicalSessionId = "session-submission-priya";
 const accepted: PortalSubmission = {
   id: "session-accepted",
   eventId: "event-1",
@@ -62,13 +66,15 @@ const roster: PortalRosterEnvelope = {
 const task: PortalTask = {
   id: "task-session-1",
   eventId: "event-1",
-  submissionId: accepted.id,
+  subject: { type: "session", sessionId: canonicalSessionId },
+  sessionTitle: "Reliable event operations",
   participantId: "speaker-1",
   type: "upload",
   owner: "speaker",
   title: "Upload final slides",
   status: "in_progress",
   dependencyIds: [],
+  acceptedAssetKinds: ["slides"],
   reminderOffsetsMinutes: [],
   version: 2,
   updatedAt: "2026-08-15T10:00:00.000Z",
@@ -77,7 +83,7 @@ const task: PortalTask = {
 const asset: PortalAsset = {
   id: "asset-v1",
   eventId: "event-1",
-  submissionId: accepted.id,
+  sessionId: canonicalSessionId,
   participantId: "speaker-1",
   kind: "slides",
   fileName: "reliable-operations.pdf",
@@ -86,6 +92,7 @@ const asset: PortalAsset = {
   state: "ready",
   createdAt: "2026-08-15T10:00:00.000Z",
   version: 1,
+  versionId: "asset-v1",
   versionFamilyId: "family-slides",
   latestVersionId: "asset-v1",
   currentVersionId: "asset-v1",
@@ -94,21 +101,15 @@ const asset: PortalAsset = {
 };
 
 describe("focused participant workspaces", () => {
-  it("scopes co-speakers, tasks, and files to the explicitly selected accepted session", () => {
+  it("keeps co-speaker roster attribution bound to the raw CFP submission ID", () => {
     const markup = renderToStaticMarkup(
       createElement(SessionsWorkspaceView, {
         eventName: "North Summit",
         sessions: [accepted, otherAccepted],
         selectedSessionId: accepted.id,
         roster,
-        tasks: [
-          task,
-          { ...task, id: "other-task", submissionId: otherAccepted.id, title: "Hidden task" },
-        ],
-        assets: [
-          asset,
-          { ...asset, id: "other-asset", submissionId: otherAccepted.id, fileName: "hidden.pdf" },
-        ],
+        tasks: [],
+        assets: [],
         canManageRoster: true,
         canInvite: true,
         busyRoster: false,
@@ -123,20 +124,20 @@ describe("focused participant workspaces", () => {
     expect(markup).toContain("Reliable event operations");
     expect(markup).toContain("Primary speaker");
     expect(markup).toContain("Marcus Okafor");
-    expect(markup).toContain("Upload final slides");
-    expect(markup).toContain("reliable-operations.pdf");
-    expect(markup).not.toContain("Hidden task");
-    expect(markup).not.toContain("hidden.pdf");
     expect(markup).not.toMatch(/remove[^<]*Priya Raman/iu);
   });
 
-  it("requires explicit session attribution for real file actions and renders truthful review data", () => {
+  it("derives Files sessions from canonical task subjects and shows their task-bound family", () => {
+    const fileSessions = authorizedFilesSessionOptions([
+      task,
+      { ...task, id: "participant-task", subject: { type: "participant" } },
+    ]);
     const markup = renderToStaticMarkup(
       createElement(FilesWorkspaceView, {
         eventName: "North Summit",
-        sessions: [accepted, otherAccepted],
-        selectedSessionId: accepted.id,
-        assets: [asset],
+        sessions: fileSessions,
+        selectedSessionId: canonicalSessionId,
+        assets: [{ ...asset, taskId: task.id }],
         participantId: "speaker-1",
         canWrite: true,
         busyAssetIds: new Set<string>(),
@@ -148,8 +149,18 @@ describe("focused participant workspaces", () => {
       }),
     );
 
+    expect(fileSessions).toEqual([
+      {
+        id: canonicalSessionId,
+        eventId: "event-1",
+        title: "Reliable event operations",
+        uploadTasks: [task],
+      },
+    ]);
+    expect(accepted.id).not.toBe(canonicalSessionId);
     expect(markup).toContain("Files for Reliable event operations");
-    expect(markup).toContain("Session attribution");
+    expect(markup).toContain(`value="${canonicalSessionId}"`);
+    expect(markup).toContain("reliable-operations.pdf");
     expect(markup).toContain("Needs changes");
     expect(markup).toContain("Replace the draft agenda slide.");
     expect(markup).toContain("Download current version");
@@ -159,6 +170,39 @@ describe("focused participant workspaces", () => {
       'accept="application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,image/jpeg,image/png,image/webp"',
     );
     expect(markup).not.toMatch(/comments|activity history|uploaded by/iu);
+  });
+  it("reconciles a removed File session against the complete current option set", () => {
+    const options = authorizedFilesSessionOptions([
+      task,
+      {
+        ...task,
+        id: "task-session-2",
+        subject: { type: "session", sessionId: "session-2" },
+        sessionTitle: "Second session",
+      },
+    ]);
+
+    expect(reconcileSelectedFileSessionId("session-removed", options)).toBe(canonicalSessionId);
+    expect(
+      reconcileSelectedFileSessionId(
+        "session-2",
+        options.filter((session) => session.id !== "session-2"),
+      ),
+    ).toBe(canonicalSessionId);
+  });
+  it("excludes an incompatible task when the selected file kind changes", () => {
+    const sessions = authorizedFilesSessionOptions([
+      { ...task, acceptedAssetKinds: ["slides"] },
+      {
+        ...task,
+        id: "supporting-task",
+        acceptedAssetKinds: ["supporting_file"],
+      },
+    ]);
+
+    expect(compatibleFilesUploadTasks(sessions[0] ?? null, "supporting_file")).toEqual([
+      expect.objectContaining({ id: "supporting-task" }),
+    ]);
   });
 
   it("keeps event-guide unavailable distinct from empty and retains safe published rendering", () => {

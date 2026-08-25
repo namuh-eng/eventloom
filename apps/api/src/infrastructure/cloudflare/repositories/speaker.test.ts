@@ -152,7 +152,6 @@ class SpeakerWorkflowD1 {
 const task: SpeakerTask = {
   id: "task-1",
   eventId: "event-1",
-  submissionId: null,
   participantId: "participant-1",
   subject: { type: "participant", participantId: "participant-1" },
   type: "upload",
@@ -252,18 +251,7 @@ describe("D1SpeakerRepository", () => {
       getTask: async (_eventId, taskId) => tasks.find((task) => task.id === taskId) ?? null,
       getTasksByIds: async (_eventId, taskIds) => tasks.filter((task) => taskIds.includes(task.id)),
       createTask: async ({ task }) => {
-        const stored: SpeakerTask = {
-          ...structuredClone(task),
-          submissionId: task.submissionId?.replace(/^speaker-submission:/u, "") ?? null,
-          ...(task.subject?.type === "session"
-            ? {
-                subject: {
-                  ...task.subject,
-                  submissionId: task.subject.submissionId.replace(/^speaker-submission:/u, ""),
-                },
-              }
-            : {}),
-        };
+        const stored: SpeakerTask = structuredClone(task);
         tasks.push(stored);
         return { ok: true, value: structuredClone(stored) };
       },
@@ -273,6 +261,22 @@ describe("D1SpeakerRepository", () => {
     });
     const service = new SpeakerService(repository, {} as never, {
       speakerSender: "speakers@example.test",
+      sessionAuthority: {
+        async getSession(organizationId, eventId, sessionId) {
+          if (
+            organizationId !== "org-1" ||
+            eventId !== "event-1" ||
+            sessionId !== "session-submission-accepted"
+          )
+            return null;
+          return {
+            tenantId: organizationId,
+            eventId,
+            status: "Accepted",
+            speakerIds: ["participant-priya"],
+          } as never;
+        },
+      },
       now: () => new Date("2026-08-15T13:00:00.000Z"),
       generateId: () => "task-organizer-1",
     });
@@ -288,7 +292,12 @@ describe("D1SpeakerRepository", () => {
         type: "action",
         title: "Confirm participation",
         allowedMimeTypes: ["application/pdf"],
-        assignments: [{ participantId: "participant-priya", submissionId: "submission-accepted" }],
+        assignments: [
+          {
+            participantId: "participant-priya",
+            subject: { type: "session", sessionId: "session-submission-accepted" },
+          },
+        ],
       }),
     });
 
@@ -299,7 +308,11 @@ describe("D1SpeakerRepository", () => {
         data: {
           id: "task-organizer-1",
           participantId: "participant-priya",
-          submissionId: "submission-accepted",
+          subject: {
+            type: "session",
+            participantId: "participant-priya",
+            sessionId: "session-submission-accepted",
+          },
           version: 1,
         },
       },
@@ -501,14 +514,24 @@ describe("D1SpeakerRepository", () => {
           eventId: "event-1",
           accountId: "account-1",
         }),
-        listSubmissions: async () => [
-          {
-            organizationId: "org-a",
-            eventId: "event-1",
-            submissionId: "submission-1",
-            participantIds: ["participant-a", "participant-b"],
-          },
-        ],
+        async listSessions(organizationId, eventId, sessionIds) {
+          if (
+            organizationId !== "org-a" ||
+            eventId !== "event-1" ||
+            !sessionIds.includes("session-1")
+          ) {
+            return [];
+          }
+          return [
+            {
+              tenantId: "org-a",
+              eventId: "event-1",
+              sessionId: "session-1",
+              status: "Accepted",
+              speakerIds: ["participant-a"],
+            },
+          ];
+        },
         listTasks: async (organizationId, eventId, participantIds) => {
           taskParticipantReads.push([...participantIds]);
           return [
@@ -516,7 +539,7 @@ describe("D1SpeakerRepository", () => {
               organizationId,
               eventId,
               taskId: "task-a",
-              submissionId: "submission-1",
+              sessionId: "session-1",
               participantId: "participant-a",
               owner: "speaker",
               title: "Authorized task",
@@ -600,6 +623,8 @@ describe("D1SpeakerRepository", () => {
 
     expect(result.ok).toBe(false); // the read-back is intentionally absent in this statement recorder
     expect(database.batches[0]?.join("\n")).toContain("INSERT INTO speaker_tasks");
+    expect(database.batches[0]?.join("\n")).toContain("session_id");
+    expect(database.batches[0]?.join("\n")).not.toContain("submission_id");
     expect(database.batches[0]?.join("\n")).toContain("INSERT INTO speaker_task_dependencies");
     expect(database.batches[0]?.join("\n")).toContain("INSERT INTO speaker_task_reminder_offsets");
   });
@@ -752,7 +777,7 @@ describe("D1SpeakerRepository", () => {
           id: "asset-v1",
           organization_id: "org-1",
           event_id: "event-1",
-          submission_id: null,
+          session_id: null,
           participant_id: "participant-1",
           task_id: "task-1",
           kind: "slides",

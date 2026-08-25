@@ -9,7 +9,7 @@ import {
 import { taskSubjectPresentation } from "./portal-task-model";
 import styles from "./portal-tasks.module.css";
 import { formatPortalDate } from "./portal-ui-model";
-import type { PortalProfile, PortalSubmission, PortalTask } from "./types";
+import type { PortalProfile, PortalTask } from "./types";
 
 export type TaskFilter = "all" | "attention" | "finished";
 
@@ -44,7 +44,6 @@ function icon(task: PortalTask) {
 interface Props {
   readonly tasks: readonly PortalTask[];
   readonly profiles: readonly PortalProfile[];
-  readonly submissions: readonly PortalSubmission[];
   readonly selectedId: string | null;
   readonly filter: TaskFilter;
   readonly temporalContext?: SpeakerEventTemporalContext;
@@ -55,7 +54,6 @@ interface Props {
 export function PortalTaskInbox({
   tasks,
   profiles,
-  submissions,
   selectedId,
   filter,
   temporalContext,
@@ -79,7 +77,7 @@ export function PortalTaskInbox({
       </fieldset>
       <ol className={styles.taskList}>
         {tasks.map((task) => {
-          const subject = taskSubjectPresentation(task, profiles, submissions);
+          const subject = taskSubjectPresentation(task, profiles);
           const deadlineWarning =
             temporalContext === undefined || task.dueAt === undefined
               ? null

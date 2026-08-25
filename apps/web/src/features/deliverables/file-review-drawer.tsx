@@ -12,7 +12,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import styles from "./file-library.module.css";
 import { FileReviewComments } from "./file-review-comments";
-import { buildFileReviewContext } from "./file-review-model";
+import { buildFileReviewContext, fileFamilyCommentThread } from "./file-review-model";
 import { FileReviewOverview } from "./file-review-overview";
 import type { FileReviewBodyProps, FileReviewDrawerProps } from "./file-review-types";
 import { FileReviewVersions } from "./file-review-versions";
@@ -46,11 +46,7 @@ export function FileReviewDrawerBody({
   }
 
   const context = buildFileReviewContext(family, asset, history, sessions, tasks, profiles);
-  const threadCount = comments.filter(
-    (comment) =>
-      comment.assetId === context.asset.id &&
-      comment.versionId === (context.asset.versionId ?? context.asset.id),
-  ).length;
+  const threadCount = fileFamilyCommentThread(comments, context.versions).length;
 
   return (
     <Tabs defaultValue="overview" className={styles.drawerTabs}>
@@ -104,7 +100,7 @@ export function FileReviewDrawer({ open, onOpenChange, ...bodyProps }: FileRevie
         <SheetHeader className={styles.drawerHeader}>
           <SheetTitle>File review</SheetTitle>
           <SheetDescription>
-            Review metadata, exact-version comments, and immutable version history.
+            Review metadata, file-family comments, and immutable version history.
           </SheetDescription>
         </SheetHeader>
         <ScrollArea className={styles.drawerScroll}>

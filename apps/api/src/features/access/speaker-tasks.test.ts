@@ -38,23 +38,24 @@ function dependencies(overrides: Partial<AccessRouteDependencies> = {}): AccessR
         eventId,
         accountId: principal.userId,
         participantIds: ["participant-1"],
-        submissionIds: ["submission-1"],
+        submissionIds: [],
         capabilities: ["task-response"],
         capabilitiesByParticipant: { "participant-1": ["task-response"] },
       }),
-      listSubmissions: async (organizationId, eventId, submissionIds) =>
-        submissionIds.map((submissionId) => ({
-          organizationId,
+      listSessions: async (organizationId, eventId, sessionIds) =>
+        sessionIds.map((sessionId) => ({
+          tenantId: organizationId,
           eventId,
-          submissionId,
-          participantIds: ["participant-1"],
+          sessionId,
+          status: "accepted",
+          speakerIds: ["participant-1"],
         })),
       listTasks: async (organizationId, eventId) => [
         {
           organizationId,
           eventId,
           taskId: "task-1",
-          submissionId: "submission-1",
+          sessionId: "session-1",
           participantId: "participant-1",
           owner: "speaker",
           title: `${organizationId} slides`,
@@ -80,14 +81,14 @@ function appFor(principal: AuthPrincipal | null, access = dependencies()) {
 }
 
 describe("GET /api/account/speaker-tasks", () => {
-  it("carries organization and event through scope, submission, and task reads", async () => {
+  it("carries organization and event through scope, canonical session, and task reads", async () => {
     const base = dependencies();
     const resolveScope = vi.fn(base.speakerTasks.resolveScope);
-    const listSubmissions = vi.fn(base.speakerTasks.listSubmissions);
+    const listSessions = vi.fn(base.speakerTasks.listSessions);
     const listTasks = vi.fn(base.speakerTasks.listTasks);
     const response = await appFor(
       user,
-      dependencies({ speakerTasks: { resolveScope, listSubmissions, listTasks } }),
+      dependencies({ speakerTasks: { resolveScope, listSessions, listTasks } }),
     ).request(
       "/api/account/speaker-tasks?organizationId=org-a&eventId=shared-event",
       {},
@@ -96,7 +97,7 @@ describe("GET /api/account/speaker-tasks", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(resolveScope).toHaveBeenCalledWith(user, "org-a", "shared-event");
-    expect(listSubmissions).toHaveBeenCalledWith("org-a", "shared-event", ["submission-1"]);
+    expect(listSessions).toHaveBeenCalledWith("org-a", "shared-event", ["session-1"]);
     expect(listTasks).toHaveBeenCalledWith("org-a", "shared-event", ["participant-1"]);
     await expect(response.json()).resolves.toEqual({
       data: {
@@ -113,10 +114,77 @@ describe("GET /api/account/speaker-tasks", () => {
       },
     });
   });
+  it("keeps participant-only tasks under invitation grants without CFP submissions", async () => {
+    const base = dependencies();
+    const listSessions = vi.fn(base.speakerTasks.listSessions);
+    const response = await appFor(
+      user,
+      dependencies({
+        speakerTasks: {
+          ...base.speakerTasks,
+          listSessions,
+          listTasks: async (organizationId, eventId) => [
+            {
+              organizationId,
+              eventId,
+              taskId: "participant-task",
+              sessionId: null,
+              participantId: "participant-1",
+              owner: "speaker",
+              title: "Biography",
+              dueAt: null,
+              status: "not_started",
+            },
+          ],
+        },
+      }),
+    ).request(
+      "/api/account/speaker-tasks?organizationId=org-a&eventId=shared-event",
+      {},
+      environment,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      data: { tasks: [{ taskId: "participant-task" }] },
+    });
+    expect(listSessions).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["stale", "draft", ["participant-1"]],
+    ["declined", "declined", ["participant-1"]],
+    ["removed member", "accepted", []],
+  ])("omits %s session tasks", async (_label, status, speakerIds) => {
+    const base = dependencies();
+    const response = await appFor(
+      user,
+      dependencies({
+        speakerTasks: {
+          ...base.speakerTasks,
+          listSessions: async (_organizationId, eventId, sessionIds) =>
+            sessionIds.map((sessionId) => ({
+              tenantId: "org-a",
+              eventId,
+              sessionId,
+              status,
+              speakerIds,
+            })),
+        },
+      }),
+    ).request(
+      "/api/account/speaker-tasks?organizationId=org-a&eventId=shared-event",
+      {},
+      environment,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ data: { tasks: [] } });
+  });
 
   it("returns no tasks and skips workload reads for submission-edit-only scope", async () => {
     const base = dependencies();
-    const listSubmissions = vi.fn(base.speakerTasks.listSubmissions);
+    const listSessions = vi.fn(base.speakerTasks.listSessions);
     const listTasks = vi.fn(base.speakerTasks.listTasks);
     const response = await appFor(
       user,
@@ -133,7 +201,7 @@ describe("GET /api/account/speaker-tasks", () => {
             capabilities: ["submission-edit"],
             capabilitiesByParticipant: { "participant-1": ["submission-edit"] },
           }),
-          listSubmissions,
+          listSessions,
           listTasks,
         },
       }),
@@ -147,7 +215,7 @@ describe("GET /api/account/speaker-tasks", () => {
     await expect(response.json()).resolves.toEqual({
       data: { organizationId: "org-a", eventId: "shared-event", tasks: [] },
     });
-    expect(listSubmissions).not.toHaveBeenCalled();
+    expect(listSessions).not.toHaveBeenCalled();
     expect(listTasks).not.toHaveBeenCalled();
   });
 
@@ -158,7 +226,7 @@ describe("GET /api/account/speaker-tasks", () => {
         organizationId,
         eventId,
         taskId: "task-authorized",
-        submissionId: "submission-1",
+        sessionId: "session-1",
         participantId: "participant-1",
         owner: "speaker" as const,
         title: "Authorized",
@@ -184,14 +252,14 @@ describe("GET /api/account/speaker-tasks", () => {
               "participant-2": ["submission-edit"],
             },
           }),
-          listSubmissions: async (organizationId, eventId) => [
-            {
-              organizationId,
+          listSessions: async (organizationId, eventId, sessionIds) =>
+            sessionIds.map((sessionId) => ({
+              tenantId: organizationId,
               eventId,
-              submissionId: "submission-1",
-              participantIds: ["participant-1", "participant-2"],
-            },
-          ],
+              sessionId,
+              status: "accepted",
+              speakerIds: ["participant-1"],
+            })),
           listTasks,
         },
       }),
@@ -254,14 +322,15 @@ describe("GET /api/account/speaker-tasks", () => {
     ],
     ["revoked grant", { resolveScope: async () => null }],
     [
-      "cross-organization submission",
+      "cross-organization canonical session",
       {
-        listSubmissions: async () => [
+        listSessions: async () => [
           {
-            organizationId: "org-b",
+            tenantId: "org-b",
             eventId: "shared-event",
-            submissionId: "submission-1",
-            participantIds: ["participant-1"],
+            sessionId: "session-1",
+            status: "accepted",
+            speakerIds: ["participant-1"],
           },
         ],
       },

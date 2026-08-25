@@ -1,4 +1,4 @@
-import type { DeliverableAsset, DeliverableMatrixItem } from "./api";
+import type { DeliverableAsset, DeliverableMatrixItem, DeliverableTask } from "./api";
 
 export interface FileFamilyProjection {
   readonly familyId: string;
@@ -11,9 +11,20 @@ export interface FileFamilyProjection {
   readonly authoritative: boolean;
   readonly exportAssetId?: string;
 }
+export function taskSessionId(task: Pick<DeliverableTask, "subject">): string | undefined {
+  return task.subject.type === "session" ? task.subject.sessionId : undefined;
+}
+
+export function assetMatchesTaskScope(asset: DeliverableAsset, task: DeliverableTask): boolean {
+  const sessionId = taskSessionId(task);
+  return (
+    asset.participantId === task.participantId &&
+    (sessionId === undefined || asset.sessionId === sessionId)
+  );
+}
 
 export function fileFamilyId(asset: DeliverableAsset): string {
-  return `${asset.participantId}\u0000${asset.taskId ?? ""}\u0000${asset.versionFamilyId ?? asset.id}`;
+  return `${asset.participantId}\u0000${asset.taskId ?? asset.sessionId ?? ""}\u0000${asset.versionFamilyId ?? asset.id}`;
 }
 
 export function compareFileVersions(left: DeliverableAsset, right: DeliverableAsset): number {

@@ -410,7 +410,6 @@ describe("speaker API adapter", () => {
       throw new Error("Expected organizer headshot replacement.");
 
     const replacement = await api.replaceHeadshot({
-      submissionId: "session-1",
       participantId: "participant-1",
       file: new File(["ok"], "speaker.png", { type: "image/png" }),
       expectedVersion: 3,
@@ -419,7 +418,6 @@ describe("speaker API adapter", () => {
     expect(replacement).toEqual({ asset: finalizedAsset, profile });
     expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
       participantId: "participant-1",
-      submissionId: "session-1",
       kind: "headshot",
     });
     expect(calls.map(({ input }) => String(input))).toEqual([
@@ -463,7 +461,6 @@ describe("speaker API adapter", () => {
 
     await expect(
       api.replaceHeadshot({
-        submissionId: "session-1",
         participantId: "participant-1",
         file: new File(["ok"], "speaker.png", { type: "image/png" }),
         expectedVersion: 3,

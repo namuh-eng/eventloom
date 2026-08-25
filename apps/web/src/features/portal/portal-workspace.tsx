@@ -8,18 +8,27 @@ import { WorkspaceState } from "@/components/workspace";
 import { participantDashboardHref } from "./participant-dashboard-model";
 import { AssetDetails } from "./portal-asset-details";
 import { EventGuideWorkspaceView } from "./portal-event-guide";
-import { type FilesWorkspaceUpload, FilesWorkspaceView } from "./portal-files-workspace";
+import {
+  type FilesSessionOption,
+  type FilesWorkspaceUpload,
+  FilesWorkspaceView,
+} from "./portal-files-workspace";
 import { usePortal } from "./portal-provider";
 import { portalContextLabel } from "./portal-provider-model";
 import { safePublishedUrl } from "./portal-published-content-model";
 import { SessionsWorkspaceView } from "./portal-sessions-workspace";
 import styles from "./portal-workspace.module.css";
+import type { PortalTask } from "./types";
 
 export type { PortalAssetVersionFamily } from "./portal-assets";
 export type { EventGuideWorkspaceViewProps } from "./portal-event-guide";
 export { EventGuideWorkspaceView } from "./portal-event-guide";
-export type { FilesWorkspaceUpload, FilesWorkspaceViewProps } from "./portal-files-workspace";
-export { FilesWorkspaceView } from "./portal-files-workspace";
+export type {
+  FilesSessionOption,
+  FilesWorkspaceUpload,
+  FilesWorkspaceViewProps,
+} from "./portal-files-workspace";
+export { compatibleFilesUploadTasks, FilesWorkspaceView } from "./portal-files-workspace";
 export type { SessionsWorkspaceViewProps } from "./portal-sessions-workspace";
 export { SessionsWorkspaceView } from "./portal-sessions-workspace";
 export { AssetDetails };
@@ -31,6 +40,38 @@ function surfaceFor(section: PortalWorkspaceSection): PortalWorkspaceSurface {
   if (section === "co-speakers") return "sessions";
   if (section === "files") return "files";
   return "event-guide";
+}
+export function authorizedFilesSessionOptions(
+  tasks: readonly PortalTask[],
+): readonly FilesSessionOption[] {
+  const sessionsById = new Map<string, FilesSessionOption>();
+  for (const task of tasks) {
+    if (
+      task.subject.type !== "session" ||
+      task.type !== "upload" ||
+      task.owner !== "speaker" ||
+      !task.sessionTitle?.trim() ||
+      !task.acceptedAssetKinds?.length
+    ) {
+      continue;
+    }
+    const existing = sessionsById.get(task.subject.sessionId);
+    sessionsById.set(task.subject.sessionId, {
+      id: task.subject.sessionId,
+      eventId: task.eventId,
+      title: task.sessionTitle,
+      uploadTasks: [...(existing?.uploadTasks ?? []), task],
+    });
+  }
+  return [...sessionsById.values()];
+}
+export function reconcileSelectedFileSessionId(
+  selectedSessionId: string | null,
+  sessions: readonly FilesSessionOption[],
+): string | null {
+  return selectedSessionId !== null && sessions.some((session) => session.id === selectedSessionId)
+    ? selectedSessionId
+    : (sessions[0]?.id ?? null);
 }
 
 const navigation: readonly { surface: PortalWorkspaceSurface; label: string; href: string }[] = [
@@ -59,8 +100,10 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
     () => (view?.submissions ?? []).filter((submission) => submission.status === "accepted"),
     [view],
   );
-  const firstAcceptedSessionId = acceptedSessions[0]?.id ?? null;
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const firstAcceptedSubmissionId = acceptedSessions[0]?.id ?? null;
+  const fileSessions = useMemo(() => authorizedFilesSessionOptions(view?.tasks ?? []), [view]);
+  const [selectedRosterSubmissionId, setSelectedRosterSubmissionId] = useState<string | null>(null);
+  const [selectedFileSessionId, setSelectedFileSessionId] = useState<string | null>(null);
   const surface = surfaceFor(section);
 
   useEffect(() => {
@@ -68,8 +111,12 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
   }, [context, portal.loadWorkspace, view]);
 
   useEffect(() => {
-    setSelectedSessionId(firstAcceptedSessionId);
-  }, [firstAcceptedSessionId]);
+    setSelectedRosterSubmissionId(firstAcceptedSubmissionId);
+  }, [firstAcceptedSubmissionId]);
+
+  useEffect(() => {
+    setSelectedFileSessionId((current) => reconcileSelectedFileSessionId(current, fileSessions));
+  }, [fileSessions]);
 
   if (loading && !view) {
     return (
@@ -109,7 +156,9 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
     );
   }
 
-  const selectedRoster = selectedSessionId ? workspace.rosters[selectedSessionId] : undefined;
+  const selectedRoster = selectedRosterSubmissionId
+    ? workspace.rosters[selectedRosterSubmissionId]
+    : undefined;
   const canManageRoster =
     portal.can("roster-manage") && Boolean(selectedRoster?.capabilities.manage);
   const canInvite = canManageRoster && Boolean(selectedRoster?.capabilities.invite);
@@ -185,36 +234,36 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
         <SessionsWorkspaceView
           eventName={portalContextLabel(context)}
           sessions={acceptedSessions}
-          selectedSessionId={selectedSessionId}
+          selectedSessionId={selectedRosterSubmissionId}
           roster={selectedRoster}
           tasks={view.tasks}
           assets={workspace.assets}
           canManageRoster={canManageRoster}
           canInvite={canInvite}
           busyRoster={busyRoster}
-          onSelectSession={setSelectedSessionId}
+          onSelectSession={setSelectedRosterSubmissionId}
           onAddCoSpeaker={(input) =>
-            selectedSessionId
+            selectedRosterSubmissionId
               ? portal.addRosterEntry({
-                  submissionId: selectedSessionId,
+                  submissionId: selectedRosterSubmissionId,
                   role: "co_speaker",
                   ...input,
                 })
               : false
           }
           onUpdateCoSpeaker={(entry, displayName) =>
-            selectedSessionId
+            selectedRosterSubmissionId
               ? portal.updateRosterEntry({
-                  submissionId: selectedSessionId,
+                  submissionId: selectedRosterSubmissionId,
                   participantId: entry.participantId,
                   displayName,
                 })
               : false
           }
           onRemoveCoSpeaker={(entry) =>
-            selectedSessionId
+            selectedRosterSubmissionId
               ? portal.removeRosterEntry({
-                  submissionId: selectedSessionId,
+                  submissionId: selectedRosterSubmissionId,
                   participantId: entry.participantId,
                 })
               : false
@@ -226,13 +275,13 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
         portal.can("asset-read") ? (
           <FilesWorkspaceView
             eventName={portalContextLabel(context)}
-            sessions={acceptedSessions}
-            selectedSessionId={selectedSessionId}
+            sessions={fileSessions}
+            selectedSessionId={selectedFileSessionId}
             assets={workspace.assets}
             participantId={participantId}
             canWrite={portal.can("asset-write")}
             busyAssetIds={busyAssetIds}
-            onSelectSession={setSelectedSessionId}
+            onSelectSession={setSelectedFileSessionId}
             onUpload={upload}
             onRetryUpload={(assetId, file) => void portal.retryAssetUpload({ assetId, file })}
             onCompleteUpload={(assetId) => void portal.completeAssetUpload({ assetId })}

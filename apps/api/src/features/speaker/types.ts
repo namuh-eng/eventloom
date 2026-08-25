@@ -42,7 +42,10 @@ export type SpeakerParticipantResolution =
 
 export type SpeakerTaskSubject =
   | { type: "participant"; participantId: string }
-  | { type: "session"; participantId: string; submissionId: string };
+  | { type: "session"; participantId: string; sessionId: string };
+export type SpeakerTaskAssignmentSubject =
+  | { type: "participant" }
+  | { type: "session"; sessionId: string };
 export type SpeakerSubmissionStatus =
   | "draft"
   | "submitted"
@@ -193,14 +196,13 @@ export interface SpeakerTask {
   maxBytes?: number;
   /** UI-compatible alias for maxBytes. */
   maxSizeBytes?: number;
-  /** Explicit participant or accepted-session subject. */
-  subject?: SpeakerTaskSubject;
+  /** Explicit participant or accepted program-session subject. */
+  subject: SpeakerTaskSubject;
   participantName?: string;
-  /** Accepted submission title used as the event-scoped session label in organizer projections. */
+  /** Accepted program-session title used as the event-scoped session label in organizer projections. */
   sessionTitle?: string;
   id: string;
   eventId: string;
-  submissionId: string | null;
   participantId: string;
   type: SpeakerTaskType;
   owner: "speaker" | "organizer";
@@ -245,7 +247,7 @@ export interface SpeakerAsset {
   /** Server-owned tenant binding. Legacy records may not have this field. */
   tenantId?: string;
   eventId: string;
-  submissionId?: string;
+  sessionId?: string;
   participantId: string;
   /** Organizer-only display label projected from the accepted event roster. */
   participantName?: string;
@@ -253,7 +255,7 @@ export interface SpeakerAsset {
   uploaderAccountId?: string;
   /** Upload-time display label snapshot safe for authorized organizer projection. */
   uploaderLabel?: string;
-  /** Accepted submission title projected for organizer file-library grouping. */
+  /** Accepted program-session title projected for organizer file-library grouping. */
   sessionTitle?: string;
   taskId?: string;
   kind: SpeakerAssetKind;
@@ -312,7 +314,7 @@ export interface SpeakerWorkspaceAsset {
   assetId: string;
   eventId: string;
   participantId: string;
-  submissionId: string | null;
+  sessionId: string | null;
   taskId: string | null;
   kind: SpeakerAssetKind;
   fileName: string;
@@ -505,7 +507,7 @@ export interface SpeakerTaskAssignmentInput {
   dueAt: string;
   assignments: readonly {
     participantId: string;
-    submissionId: string | null;
+    subject: SpeakerTaskAssignmentSubject;
   }[];
 }
 
@@ -540,7 +542,7 @@ export interface SpeakerTaskCreateInput {
   decisionFence?: SpeakerDecisionWriteFence;
   assignments: readonly {
     participantId: string;
-    submissionId: string | null;
+    subject: SpeakerTaskAssignmentSubject;
   }[];
 }
 
@@ -1021,6 +1023,13 @@ export interface SpeakerOrganizerAccessScope {
   submissionIds: readonly string[];
   participantIds: readonly string[];
 }
+export interface SpeakerSessionAuthority {
+  getSession(
+    organizationId: string,
+    eventId: string,
+    sessionId: string,
+  ): Promise<import("../sessions/types").Session | null>;
+}
 
 export interface UpdateSpeakerProfileCommand {
   eventId: string;
@@ -1296,11 +1305,16 @@ export interface CreatePrivateUploadGrantCommand {
 }
 
 /** Server-only binding persisted with an opaque capability. */
+export type PrivateAssetCapabilitySubject =
+  | { kind: "cfp_submission"; submissionId: string }
+  | { kind: "speaker_session"; sessionId: string }
+  | { kind: "participant" };
+
 export interface PrivateAssetCapabilityBinding {
   capabilityId: string;
   tenantId: string;
   eventId: string;
-  submissionId?: string;
+  subject: PrivateAssetCapabilitySubject;
   participantId: string;
   taskId?: string;
   objectKey: string;

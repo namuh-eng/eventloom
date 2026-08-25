@@ -67,8 +67,12 @@ const migrationNames = [
   "0048_speaker_task_replacement_baseline.sql",
   "0049_private_download_attribution.sql",
   "0050_private_object_cleanup.sql",
+  "0051_evaluation_decision_outbox.sql",
   "0052_shared_ai_triage.sql",
   "0053_cfp_configuration_write_guards.sql",
+  "0054_review_round_lineage_candidates.sql",
+  "0055_speaker_task_session_subjects.sql",
+  "0056_private_download_capability_subject.sql",
 ] as const;
 
 class FakeR2Bucket {
@@ -185,6 +189,11 @@ export function createSpeakerLifecycleFixture(): SpeakerLifecycleFixture {
         repository,
         assets,
         service: new SpeakerService(repository, assets, {
+          sessionAuthority: {
+            async getSession() {
+              return null;
+            },
+          },
           speakerSender: "speakers@example.test",
           now: options?.now ?? (() => new Date(speakerLifecycleNow)),
           generateId: () => `lifecycle-${++idSequence}`,

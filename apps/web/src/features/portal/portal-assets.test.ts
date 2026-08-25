@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assetPointerLabels,
+  groupPortalAssetVersions,
   portalFileStatus,
   portalReviewStatus,
   resolvePortalAssetFamily,
@@ -11,7 +12,7 @@ function asset(id: string, overrides: Partial<PortalAsset> = {}): PortalAsset {
   return {
     id,
     eventId: "event-1",
-    submissionId: "submission-1",
+    sessionId: "session-1",
     participantId: "participant-1",
     kind: "slides",
     fileName: "slides.pdf",
@@ -56,6 +57,26 @@ describe("portal asset presentation", () => {
     ]);
     expect(portalFileStatus(latest)).toBe("Processing upload");
     expect(portalReviewStatus(current)).toBe("Approved");
+  });
+  it("keeps task-bound immutable versions in one family and resolves the latest pointer", () => {
+    const v1 = asset("asset-v1", {
+      taskId: "task-slides",
+      latestVersionId: "asset-v2",
+      currentVersionId: "asset-v2",
+    });
+    const v2 = asset("asset-v2", {
+      taskId: "task-slides",
+      version: 2,
+      supersedesAssetId: v1.id,
+      latestVersionId: "asset-v2",
+      currentVersionId: "asset-v2",
+    });
+
+    const family = groupPortalAssetVersions([v2, v1])[0];
+    expect(family?.versions.map((version) => version.id)).toEqual(["asset-v1", "asset-v2"]);
+    expect(resolvePortalAssetFamily(family?.versions ?? [], family?.current).latest?.id).toBe(
+      v2.id,
+    );
   });
 
   it("does not infer current or review state when authoritative pointers are missing", () => {

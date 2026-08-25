@@ -4,15 +4,16 @@ import {
   AgendaTimeZoneError,
   canonicalizeTimeZone,
   disambiguationForInstant,
+  formatInstantInTimeZone,
   localDateInTimeZone,
   resolveLocalDateTime,
 } from "./timezone";
 import type {
   AcceptAgendaSuggestionChangeInput,
-  AgendaCompareAndSwapContext,
   AgendaAuditEntry,
   AgendaCatalog,
   AgendaClock,
+  AgendaCompareAndSwapContext,
   AgendaCustomRule,
   AgendaDraft,
   AgendaEntry,
@@ -898,13 +899,14 @@ export class AgendaEngine {
       validateMinimumTravelMinutes(input.minimumTravelMinutes);
       const catalog = normalizeCatalog(input);
       const synchronizedCatalog = retainScheduledSessionsAsIneligible(state, catalog);
-      validateStoredEntries(state.draft.entries, synchronizedCatalog);
+      const entries = refreshPublishedEntries(synchronizedCatalog, state.draft.entries);
+      validateStoredEntries(entries, synchronizedCatalog);
       const candidate = {
         ...state,
         minimumTravelMinutes: input.minimumTravelMinutes,
         ...synchronizedCatalog,
       };
-      const report = this.validationReport(candidate, state.draft.entries);
+      const report = this.validationReport(candidate, entries);
       if (report.conflicts.length > 0) {
         throw new AgendaValidationError("Catalog changes introduce hard conflicts", report);
       }
@@ -913,6 +915,7 @@ export class AgendaEngine {
       const now = this.now();
       const draft: AgendaDraft = {
         ...state.draft,
+        entries,
         version: state.draft.version + 1,
         warningOverrides: state.draft.warningOverrides.filter((override) =>
           activeWarningIds.has(override.warningId),
@@ -1003,6 +1006,16 @@ export class AgendaEngine {
           `Only accepted sessions can be published: ${nonAcceptedSessionId}`,
         );
       }
+      const unapprovedSessionId = firstPubliclyIneligibleSessionId(
+        state.sessions,
+        state.draft.entries,
+      );
+      if (unapprovedSessionId !== null) {
+        throw new AgendaError(
+          "PUBLICATION_BLOCKED",
+          `Only approval-eligible sessions can be published: ${unapprovedSessionId}`,
+        );
+      }
       if (state.validatedDraftVersion !== state.draft.version || state.validatedAt === undefined) {
         throw new AgendaError(
           "PUBLICATION_BLOCKED",
@@ -1079,7 +1092,8 @@ export class AgendaEngine {
           changed: false,
         };
       }
-      const entries = refreshPublishedEntries(input.catalog, current.entries);
+      const catalog = normalizeCatalog(input.catalog);
+      const entries = refreshPublishedEntries(catalog, current.entries);
       if (publishedEntriesEqual(entries, current.entries)) {
         const result = { status: "unchanged" as const, revision: current };
         return {
@@ -1180,7 +1194,18 @@ export class AgendaEngine {
         updatedAt: now,
         updatedBy: input.actorId,
       };
-      const revision = this.revision(state, input.actorId, now, target.id, draft);
+      const revision: PublishedAgendaRevision = {
+        id: this.#idGenerator.nextId("revision"),
+        eventId: state.eventId,
+        revisionNumber: state.revisions.length + 1,
+        sourceDraftVersion: draft.version,
+        timeZone: target.timeZone,
+        entries: structuredClone(target.entries),
+        warningOverrides: structuredClone(targetOverrides),
+        publishedAt: now,
+        publishedBy: input.actorId,
+        rollbackOfRevisionId: target.id,
+      };
       const outbox = this.outbox(state.eventId, revision.id, now);
       return {
         state: {
@@ -1989,10 +2014,22 @@ function normalizeCatalog(catalog: AgendaCatalog): AgendaCatalog {
         `Session ${session.id} capacityRequired must be a non-negative integer`,
       );
     }
+    if (
+      session.durationMinutes !== undefined &&
+      (!Number.isInteger(session.durationMinutes) || session.durationMinutes < 1)
+    ) {
+      throw new AgendaError(
+        "INVALID_AGENDA",
+        `Session ${session.id} durationMinutes must be a positive integer`,
+      );
+    }
+    const trackIds = [...(session.trackIds ?? [])];
+    validateUniqueStrings(trackIds, `session ${session.id} tracks`);
     return {
       ...session,
       participantIds: [...session.participantIds],
       resourceIds: [...session.resourceIds],
+      trackIds,
     };
   });
   const rooms: AgendaRoom[] = catalog.rooms.map((room) => {
@@ -2101,6 +2138,7 @@ function retainScheduledSessionsAsIneligible(
       id: session.id,
       title: session.title,
       status: "ineligible",
+      publicApprovalEligible: false,
       participantIds: [],
       resourceIds: [],
       capacityRequired: 0,
@@ -2119,6 +2157,19 @@ function firstNonAcceptedSessionId(
   for (const entry of entries) {
     const session = sessionsById.get(entry.sessionId);
     if (session === undefined || session.status.trim().toLowerCase() !== "accepted") {
+      return entry.sessionId;
+    }
+  }
+  return null;
+}
+
+function firstPubliclyIneligibleSessionId(
+  sessions: readonly AgendaSession[],
+  entries: readonly AgendaEntry[],
+): string | null {
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  for (const entry of entries) {
+    if (sessionsById.get(entry.sessionId)?.publicApprovalEligible !== true) {
       return entry.sessionId;
     }
   }
@@ -2211,21 +2262,56 @@ function refreshPublishedEntries(
   return entries.map((entry) => {
     const current = publishedEntryMetadata(entry);
     const session = sessions.get(entry.sessionId);
-    const resolvedTrackNames = entry.trackIds.flatMap((trackId) => {
+    const approvedSession = session?.publicApprovalEligible === true ? session : undefined;
+    const approvedDuration = approvedSession?.durationMinutes;
+    const trackIds =
+      approvedSession === undefined ? [...entry.trackIds] : [...(approvedSession.trackIds ?? [])];
+    const resolvedTrackNames = trackIds.flatMap((trackId) => {
       const track = tracks.get(trackId);
       return track === undefined ? [] : [track.name];
     });
+    const { endDisambiguation: _previousEndDisambiguation, ...entryWithoutEndDisambiguation } =
+      structuredClone(entry);
+    const refreshedDuration =
+      approvedSession === undefined || approvedDuration === undefined
+        ? {
+            endsAt: entry.endsAt,
+            endsAtLocal: entry.endsAtLocal,
+            ...(entry.endDisambiguation === undefined
+              ? {}
+              : { endDisambiguation: entry.endDisambiguation }),
+          }
+        : (() => {
+            const endsAt = new Date(
+              Date.parse(entry.startsAt) + approvedDuration * 60_000,
+            ).toISOString();
+            const endsAtLocal = formatInstantInTimeZone(endsAt, entry.timeZone).slice(0, 16);
+            const endDisambiguation = disambiguationForInstant(endsAtLocal, entry.timeZone, endsAt);
+            return {
+              endsAt,
+              endsAtLocal,
+              ...(endDisambiguation === undefined ? {} : { endDisambiguation }),
+            };
+          })();
     return {
-      ...structuredClone(entry),
+      ...entryWithoutEndDisambiguation,
+      trackIds,
+      ...refreshedDuration,
       metadata: {
-        title: session?.title ?? current.title,
-        summary: session === undefined ? current.summary : (session.summary?.trim() ?? ""),
-        format: session === undefined ? current.format : session.format?.trim() || "Session",
+        title: approvedSession?.title ?? current.title,
+        summary:
+          approvedSession === undefined ? current.summary : (approvedSession.summary?.trim() ?? ""),
+        format:
+          approvedSession === undefined
+            ? current.format
+            : approvedSession.format?.trim() || "Session",
         speakerNames:
-          session === undefined ? [...current.speakerNames] : [...(session.speakerNames ?? [])],
+          approvedSession === undefined
+            ? [...current.speakerNames]
+            : [...(approvedSession.speakerNames ?? [])],
         roomName: rooms.get(entry.roomId)?.name ?? current.roomName,
         trackNames:
-          resolvedTrackNames.length === entry.trackIds.length
+          resolvedTrackNames.length === trackIds.length
             ? resolvedTrackNames
             : [...current.trackNames],
       },

@@ -74,7 +74,7 @@ it("queues each task at its exact reminder threshold and keeps later runs idempo
     allowedMimeTypes: ["application/pdf"],
     maxBytes: 5_000_000,
     dueAt: "2099-09-07",
-    assignments: [{ participantId: "participant-priya", submissionId: null }],
+    assignments: [{ participantId: "participant-priya", subject: { type: "participant" } }],
   });
   const [overdueTask] = await phase.service.createOrganizerTask({
     eventId: ids.eventId,
@@ -85,7 +85,7 @@ it("queues each task at its exact reminder threshold and keeps later runs idempo
     allowedMimeTypes: ["application/pdf"],
     maxBytes: 5_000_000,
     dueAt: "2099-09-04",
-    assignments: [{ participantId: "participant-priya", submissionId: null }],
+    assignments: [{ participantId: "participant-priya", subject: { type: "participant" } }],
   });
   if (upcomingTask === undefined || overdueTask === undefined) {
     throw new Error("The reminder test tasks were not created.");

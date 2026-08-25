@@ -103,12 +103,10 @@ describe("deliverables API", () => {
           data: {
             id: "task-1",
             eventId: "event-1",
-            submissionId: "submission-1",
             participantId: "participant-1",
             subject: {
               type: "session",
-              participantId: "participant-1",
-              submissionId: "submission-1",
+              sessionId: "session-marcus",
             },
             type: "upload",
             owner: "speaker",
@@ -137,13 +135,17 @@ describe("deliverables API", () => {
       allowedMimeTypes: ["Application/PDF"],
       maxSizeBytes: 5_000_000,
       acceptedAssetKinds: ["slides", "supporting_file"],
-      assignments: [{ participantId: "participant-1", submissionId: "submission-1" }],
+      assignments: [
+        {
+          participantId: "participant-1",
+          subject: { type: "session", sessionId: "session-marcus" },
+        },
+      ],
     });
     expect(created).toMatchObject({
       subject: {
         type: "session",
-        participantId: "participant-1",
-        submissionId: "submission-1",
+        sessionId: "session-marcus",
       },
       allowedMimeTypes: ["application/pdf"],
       maxBytes: 5_000_000,
@@ -161,7 +163,12 @@ describe("deliverables API", () => {
         allowedMimeTypes: ["application/pdf"],
         maxBytes: 5_000_000,
         acceptedAssetKinds: ["slides", "supporting_file"],
-        assignments: [{ participantId: "participant-1", submissionId: "submission-1" }],
+        assignments: [
+          {
+            participantId: "participant-1",
+            subject: { type: "session", sessionId: "session-marcus" },
+          },
+        ],
       },
     });
     await expect(
@@ -172,7 +179,7 @@ describe("deliverables API", () => {
         allowedMimeTypes: ["application/pdf"],
         maxSizeBytes: 5_000_000,
         acceptedAssetKinds: [],
-        assignments: [{ participantId: "participant-1", submissionId: null }],
+        assignments: [{ participantId: "participant-1", subject: { type: "participant" } }],
       }),
     ).rejects.toThrow("accepted asset kind");
     await expect(
@@ -183,7 +190,7 @@ describe("deliverables API", () => {
         allowedMimeTypes: ["application/pdf"],
         maxSizeBytes: 5_000_000,
         acceptedAssetKinds: ["slides"],
-        assignments: [{ participantId: "", submissionId: null }],
+        assignments: [{ participantId: "", subject: { type: "participant" } }],
       }),
     ).rejects.toThrow("assignment");
     expect(requests).toHaveLength(1);
@@ -331,7 +338,6 @@ describe("deliverables API", () => {
 
     if (api.replaceHeadshot === undefined) throw new Error("Expected organizer headshot adapter.");
     const result = await api.replaceHeadshot({
-      submissionId: "submission-1",
       participantId: "participant-1",
       file: new File(["headshot-v2"], "speaker.png", { type: "image/png" }),
       supersedesAssetId: "asset-headshot-v1",
@@ -348,7 +354,6 @@ describe("deliverables API", () => {
       "https://api.example.test/api/speaker/events/event-1/organizer/profiles/participant-1",
     ]);
     expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
-      submissionId: "submission-1",
       participantId: "participant-1",
       kind: "headshot",
       fileName: "speaker.png",
@@ -498,7 +503,7 @@ describe("deliverables API", () => {
     const currentAsset = {
       id: "asset-2",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "session-priya",
       participantId: "participant-1",
       taskId: "task-1",
       kind: "slides",
@@ -517,12 +522,10 @@ describe("deliverables API", () => {
     const task = {
       id: "task-1",
       eventId: "event-1",
-      submissionId: "submission-1",
       participantId: "participant-1",
       subject: {
         type: "session",
-        participantId: "participant-1",
-        submissionId: "submission-1",
+        sessionId: "session-priya",
       },
       type: "upload",
       owner: "speaker",
@@ -585,7 +588,8 @@ describe("deliverables API", () => {
     });
     expect(matrix?.items[0]).toMatchObject({
       status: "needs_changes",
-      currentAsset: { id: "asset-2", version: 2 },
+      task: { subject: { type: "session", sessionId: "session-priya" } },
+      currentAsset: { id: "asset-2", sessionId: "session-priya", version: 2 },
     });
     expect(matrix?.items[0]?.currentAsset).not.toHaveProperty("objectKey");
     expect(matrix?.items[0]?.currentAsset).not.toHaveProperty("tenantId");
@@ -624,5 +628,38 @@ describe("deliverables API", () => {
     expect(requestedUrl).not.toMatch(/^\/\//);
     expect(requestedUrl).not.toMatch(/^https?:\/\//);
     expect(requestInit?.credentials).toBe("include");
+  });
+  it("accepts self-consistent comments from every authorized immutable family version", async () => {
+    const api = createDeliverablesApi("https://api.example.test", "org-1", "event-1", async () =>
+      Response.json({
+        data: [
+          {
+            id: "comment-v1",
+            eventId: "event-1",
+            assetId: "asset-v1",
+            versionId: "asset-v1",
+            body: "Draft deck - final version coming Friday.",
+            authorLabel: "Priya Raman",
+            createdAt: "2026-08-25T10:06:00.000Z",
+            version: 1,
+          },
+          {
+            id: "comment-v2",
+            eventId: "event-1",
+            assetId: "asset-v2",
+            versionId: "asset-v2",
+            body: "Thanks - please confirm the final version by Tuesday.",
+            authorLabel: "Organizer",
+            createdAt: "2026-08-25T10:07:00.000Z",
+            version: 1,
+          },
+        ],
+      }),
+    );
+
+    await expect(api.listAssetComments?.("asset-v2")).resolves.toEqual([
+      expect.objectContaining({ id: "comment-v1", assetId: "asset-v1" }),
+      expect.objectContaining({ id: "comment-v2", assetId: "asset-v2" }),
+    ]);
   });
 });

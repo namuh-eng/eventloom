@@ -2442,7 +2442,6 @@ function useSpeakerWorkspaceController({
       const replacement = assertSpeakerHeadshotReplacement(
         await api.replaceHeadshot({
           participantId,
-          submissionId: selectedHeadshotSubmissionId,
           file,
           expectedVersion,
           ...(supersedesAssetId === undefined

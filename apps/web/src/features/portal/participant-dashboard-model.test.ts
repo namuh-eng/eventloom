@@ -46,7 +46,7 @@ function task(overrides: Partial<PortalTask> = {}): PortalTask {
   return {
     id: "task-1",
     eventId: "event/north",
-    submissionId: "accepted-1",
+    subject: { type: "participant" },
     participantId: "speaker-north",
     type: "form",
     owner: "speaker",
@@ -234,26 +234,39 @@ describe("participant dashboard model", () => {
     });
   });
 
-  it("scopes and summarizes assigned speaker tasks without inferring unmodeled readiness", () => {
+  it("scopes direct session and participant tasks to an admitted, capable speaker", () => {
+    const sessionTask = task({
+      id: "session-task",
+      subject: { type: "session", sessionId: "program-session-1" },
+    });
     const tasks = [
       task({ id: "completed", status: "completed" }),
       task({ id: "waived", status: "waived" }),
       task({ id: "awaiting-review", status: "submitted" }),
       task({ id: "blocked", status: "needs_changes", dependencyIds: ["awaiting-review"] }),
-      task({ id: "start", submissionId: null, status: "not_started" }),
+      sessionTask,
       task({ id: "different-event", eventId: "event/south" }),
       task({ id: "different-speaker", participantId: "speaker-south" }),
-      task({ id: "not-authorized", submissionId: "secret-submission" }),
     ];
-    const scoped = selectParticipantDashboardTasks(northContext, tasks);
+    const scoped = selectParticipantDashboardTasks(
+      context({ submissionIds: ["unrelated-cfp-submission"] }),
+      tasks,
+    );
 
     expect(scoped.map(({ id }) => id)).toEqual([
       "completed",
       "waived",
       "awaiting-review",
       "blocked",
-      "start",
+      "session-task",
     ]);
+    expect(selectParticipantDashboardTasks(context({ capabilities: [] }), tasks)).toEqual([]);
+    expect(
+      selectParticipantDashboardTasks(
+        context({ participantIds: ["speaker-south"], authorizedParticipantIds: ["speaker-south"] }),
+        tasks,
+      ),
+    ).toEqual([]);
     expect(summarizeParticipantDashboardTasks(scoped)).toEqual({
       totalTaskCount: 5,
       finishedTaskCount: 2,

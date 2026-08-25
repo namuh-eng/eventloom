@@ -22,6 +22,7 @@ const restoreTablePattern = new RegExp(
   `^INSERT\\s+INTO\\s+(${sqlIdentifierSource})\\s+SELECT\\s+\\*\\s+FROM\\s+(${sqlIdentifierSource})$`,
   "i",
 );
+const deleteTablePattern = new RegExp(`^DELETE\\s+FROM\\s+(${sqlIdentifierSource})$`, "i");
 
 function parseArguments(argv) {
   let environment = "local";
@@ -149,19 +150,25 @@ function destructiveMigrationError(migration) {
 export function validateMigrationSql(migration, sql) {
   const statements = splitSql(sql);
   const drops = indexesMatching(statements, dropTablePattern);
+  const deletes = indexesMatching(statements, deleteTablePattern);
   const hasForeignKeysOff = statements.some((statement) =>
     /^PRAGMA\s+foreign_keys\s*(?:=|\()\s*(?:OFF|0)\s*\)?$/i.test(statement),
   );
 
-  if (
-    statements.some((statement) => /\b(?:DROP\s+COLUMN|TRUNCATE|DELETE\s+FROM)\b/i.test(statement))
-  ) {
+  if (statements.some((statement) => /\b(?:DROP\s+COLUMN|TRUNCATE)\b/i.test(statement))) {
     throw destructiveMigrationError(migration);
   }
   const dropTableStatementCount = statements.filter((statement) =>
     /\bDROP\s+TABLE\b/i.test(statement),
   ).length;
   if (dropTableStatementCount !== drops.length) throw destructiveMigrationError(migration);
+  const deleteTableStatementCount = statements.filter((statement) =>
+    /\bDELETE\s+FROM\b/i.test(statement),
+  ).length;
+  if (deleteTableStatementCount !== deletes.length) throw destructiveMigrationError(migration);
+  if (drops.length === 0 && deletes.length > 0) {
+    throw destructiveMigrationError(migration);
+  }
 
   if (drops.length > 0) {
     const migrationNumber = /^(\d{4})_/.exec(migration)?.[1];
@@ -169,9 +176,29 @@ export function validateMigrationSql(migration, sql) {
     const originalDrops = drops.filter(
       ({ match }) => !snapshotPrefix || !normalizeIdentifier(match[1]).startsWith(snapshotPrefix),
     );
-    const snapshotDrops = drops.filter(
-      ({ match }) => snapshotPrefix && normalizeIdentifier(match[1]).startsWith(snapshotPrefix),
+    const expectedSnapshotTables = new Set(
+      originalDrops.map(({ match }) => `${snapshotPrefix}${normalizeIdentifier(match[1])}`),
     );
+    const snapshotDrops = drops.filter(({ match }) =>
+      expectedSnapshotTables.has(normalizeIdentifier(match[1])),
+    );
+    const helperDrops = drops.filter(({ match }) => {
+      const table = normalizeIdentifier(match[1]);
+      return (
+        snapshotPrefix && table.startsWith(snapshotPrefix) && !expectedSnapshotTables.has(table)
+      );
+    });
+    for (const helperDrop of helperDrops) {
+      const helperTable = normalizeIdentifier(helperDrop.match[1]);
+      const matchingCreates = indexesMatching(
+        statements,
+        snapshotTablePattern,
+        (match) => normalizeIdentifier(match[1]) === helperTable,
+      );
+      if (matchingCreates.length !== 1 || matchingCreates[0].index >= helperDrop.index) {
+        throw destructiveMigrationError(migration);
+      }
+    }
 
     if (
       hasForeignKeysOff ||
@@ -180,6 +207,37 @@ export function validateMigrationSql(migration, sql) {
       originalDrops.length !== snapshotDrops.length
     ) {
       throw destructiveMigrationError(migration);
+    }
+    for (const deletion of deletes) {
+      const sourceTable = normalizeIdentifier(deletion.match[1]);
+      const snapshotTable = `${snapshotPrefix}${sourceTable}`;
+      const matchingSnapshots = indexesMatching(
+        statements,
+        snapshotTablePattern,
+        (match) =>
+          normalizeIdentifier(match[1]) === snapshotTable &&
+          normalizeIdentifier(match[2]) === sourceTable,
+      );
+      const matchingRestores = indexesMatching(
+        statements,
+        restoreTablePattern,
+        (match) =>
+          normalizeIdentifier(match[1]) === sourceTable &&
+          normalizeIdentifier(match[2]) === snapshotTable,
+      );
+      const matchingSnapshotDrops = [...snapshotDrops, ...helperDrops].filter(
+        ({ match }) => normalizeIdentifier(match[1]) === snapshotTable,
+      );
+      if (
+        matchingSnapshots.length !== 1 ||
+        matchingRestores.length !== 1 ||
+        matchingSnapshotDrops.length !== 1 ||
+        matchingSnapshots[0].index >= deletion.index ||
+        deletion.index >= matchingRestores[0].index ||
+        matchingRestores[0].index >= matchingSnapshotDrops[0].index
+      ) {
+        throw destructiveMigrationError(migration);
+      }
     }
 
     const snapshots = [];
@@ -250,6 +308,7 @@ export function validateMigrationSql(migration, sql) {
         const parent = rebuilds.get(parentTable);
         if (
           parent &&
+          parent !== child &&
           !(
             child.drop.index < parent.drop.index &&
             parent.create.index < child.create.index &&

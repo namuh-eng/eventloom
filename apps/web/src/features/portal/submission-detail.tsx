@@ -10,13 +10,7 @@ import {
   portalSubmissionActionTargets,
   portalSubmissionDisplayTitle,
 } from "./portal-submission-model";
-import {
-  EmptyState,
-  PageHeading,
-  PortalContentState,
-  SubmissionStatusBadge,
-  TaskStatusBadge,
-} from "./portal-ui";
+import { EmptyState, PageHeading, PortalContentState, SubmissionStatusBadge } from "./portal-ui";
 import { formatPortalDate } from "./portal-ui-model";
 import { SubmissionAnswers, SubmissionParticipants } from "./submission-detail-sections";
 import type { PortalSubmissionStatus } from "./types";
@@ -58,10 +52,6 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
   }
 
   const presentation = submissionStatusPresentation(submission.status);
-  const submissionTasks = view.tasks.filter(
-    (task) =>
-      task.submissionId !== null && portalSubmissionIdsMatch(task.submissionId, submission.id),
-  );
   const displayTitle = portalSubmissionDisplayTitle(submission, view.submissions);
   const currentJourneyIndex = standardJourney.indexOf(submission.status);
   const actionTargets =
@@ -173,30 +163,13 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
           <div className={styles.panelHeading}>
             <div>
               <p className={styles.eyebrow}>Accepted speaker checklist</p>
-              <h2 id="accepted-tasks-heading">Tasks for this session</h2>
+              <h2 id="accepted-tasks-heading">My tasks</h2>
             </div>
-            {can("task-response") ? (
-              <Link href={`/portal/tasks${eventQuery}`}>Open task workspace</Link>
-            ) : null}
           </div>
-          {submissionTasks.length === 0 ? (
-            <EmptyState
-              title="No tasks assigned"
-              description="The event team has not assigned any tasks for this session."
-            />
-          ) : (
-            <ul className={styles.detailTaskList}>
-              {submissionTasks.map((task) => (
-                <li key={task.id}>
-                  <div>
-                    <h3>{task.title}</h3>
-                    <p>{task.description || "Complete this requirement for the event team."}</p>
-                  </div>
-                  <TaskStatusBadge status={task.status} />
-                </li>
-              ))}
-            </ul>
-          )}
+          <p>Tasks are organized by their current participant or program-session assignment.</p>
+          {can("task-response") ? (
+            <Link href={`/portal/tasks${eventQuery}`}>Open My tasks</Link>
+          ) : null}
         </section>
       ) : null}
     </>

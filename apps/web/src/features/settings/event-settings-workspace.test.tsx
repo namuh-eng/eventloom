@@ -1,8 +1,16 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { createNavigationDataCache } from "@/lib/navigation-data-cache";
 import { qualifiedEventContext } from "../admin/admin-shell";
 import { OrganizerEventWorkspaceProvider } from "../admin/organizer-event-workspace";
+import {
+  agendaWorkspaceCacheKey,
+  agendaWorkspaceCacheTags,
+  loadCanonicalAgendaWorkspaceWithCache,
+} from "../agenda/agenda-workspace-model";
+import type { AgendaApi } from "../agenda/api";
+import type { AgendaWorkspaceData } from "../agenda/types";
 import {
   createEventSettingsApi,
   defaultAgendaEligibleStatuses,
@@ -21,7 +29,11 @@ import {
   isCompleteEventSettingsNavigationCacheSnapshot,
 } from "./event-settings-navigation-cache-model";
 import { eventSettingsSectionHref } from "./event-settings-sections";
-import { EventSettingsWorkspaceView } from "./event-settings-workspace";
+import {
+  EventSettingsWorkspaceView,
+  eventSettingsMutationInvalidatesAgendaCatalog,
+  invalidateAgendaCatalogAfterEventSettingsMutation,
+} from "./event-settings-workspace";
 import {
   canCommitEventSettingsAsyncCompletion,
   eventSettingsSectionNavigation,
@@ -30,6 +42,18 @@ import {
   persistEventSettingsMutation,
   validateRoomForm,
 } from "./event-settings-workspace-model";
+
+const staleAgendaCatalog = {
+  event: { id: "event-a" },
+  rooms: [],
+  tracks: [],
+} as unknown as AgendaWorkspaceData;
+
+const freshAgendaCatalog = {
+  event: { id: "event-a" },
+  rooms: [{ id: "room-new", name: "New room", capacity: 120 }],
+  tracks: [{ id: "track-new", name: "New track", color: "#123456" }],
+} as unknown as AgendaWorkspaceData;
 
 const settings: SessionSettingsRecord = {
   id: "settings_event-a",
@@ -148,6 +172,45 @@ describe("event settings mutation persistence", () => {
       ),
     ).rejects.toThrow("write failed");
     expect(refreshed).toBe(false);
+  });
+});
+describe("agenda catalog invalidation after event settings mutations", () => {
+  it("loads a fresh room and track catalog after settings creation", async () => {
+    const cache = createNavigationDataCache();
+    const organizationId = "org_a";
+    const eventId = "event-a";
+    const key = agendaWorkspaceCacheKey(organizationId, eventId);
+    const tags = agendaWorkspaceCacheTags(organizationId, eventId);
+    let workspaceReads = 0;
+    const agendaApi = {
+      getWorkspace: async () => {
+        workspaceReads += 1;
+        return freshAgendaCatalog;
+      },
+    } as unknown as AgendaApi;
+
+    cache.write(key, staleAgendaCatalog, tags);
+    cache.write("event-navigation:event-a", { preserved: true }, ["event:event-a"]);
+    invalidateAgendaCatalogAfterEventSettingsMutation(cache, eventId);
+    expect(cache.peek("event-navigation:event-a")).toEqual({ preserved: true });
+
+    await expect(
+      loadCanonicalAgendaWorkspaceWithCache(agendaApi, eventId, cache, key, tags),
+    ).resolves.toMatchObject({
+      data: {
+        rooms: [{ id: "room-new" }],
+        tracks: [{ id: "track-new" }],
+      },
+    });
+    expect(workspaceReads).toBe(1);
+  });
+
+  it("invalidates only agenda-relevant classification kinds", () => {
+    expect(eventSettingsMutationInvalidatesAgendaCatalog()).toBe(true);
+    expect(eventSettingsMutationInvalidatesAgendaCatalog("track")).toBe(true);
+    expect(eventSettingsMutationInvalidatesAgendaCatalog("format")).toBe(true);
+    expect(eventSettingsMutationInvalidatesAgendaCatalog("level")).toBe(false);
+    expect(eventSettingsMutationInvalidatesAgendaCatalog("tag")).toBe(false);
   });
 });
 describe("event settings navigation cache", () => {

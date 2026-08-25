@@ -1,7 +1,6 @@
 import { formatUploadMimeTypes } from "@eventloom/contracts";
-import { portalSubmissionIdsMatch } from "./model";
 import { formatPortalFileSize } from "./portal-ui-model";
-import type { PortalProfile, PortalSubmission, PortalTask } from "./types";
+import type { PortalProfile, PortalTask, PortalTaskSubject } from "./types";
 
 type RuntimeRecord = Record<string, unknown>;
 
@@ -17,52 +16,27 @@ export function taskString(value: unknown): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
-export type TaskSubject =
-  | { type: "participant"; participantId: string }
-  | { type: "session"; participantId: string; submissionId: string };
+export type TaskSubject = PortalTaskSubject;
 export type TaskSubjectResolution =
   | { subject: TaskSubject; error: null }
   | { subject: null; error: string };
 
 export function resolveTaskSubject(task: PortalTask): TaskSubjectResolution {
   const record = asTaskRecord(task);
-  const participantId = taskString(record?.participantId);
-  const submissionId = record?.submissionId;
-  const explicit = asTaskRecord(record?.subject);
-  if (!participantId) {
+  if (!taskString(record?.participantId)) {
     return { subject: null, error: "Task subject metadata is missing a participant." };
   }
-  if (explicit) {
-    if (taskString(explicit.participantId) !== participantId) {
-      return { subject: null, error: "Task subject metadata does not match its participant." };
-    }
-    if (explicit.type === "participant" && submissionId === null) {
-      return { subject: { type: "participant", participantId }, error: null };
-    }
-    const explicitSubmissionId = taskString(explicit.submissionId);
-    if (
-      explicit.type === "session" &&
-      explicitSubmissionId &&
-      typeof submissionId === "string" &&
-      portalSubmissionIdsMatch(explicitSubmissionId, submissionId)
-    ) {
-      return {
-        subject: { type: "session", participantId, submissionId: explicitSubmissionId },
-        error: null,
-      };
-    }
-    return { subject: null, error: "Task subject metadata is invalid or inconsistent." };
+  const subject = asTaskRecord(record?.subject);
+  if (!subject) {
+    return { subject: null, error: "Task subject metadata is missing." };
   }
-  if (submissionId === null) {
-    return { subject: { type: "participant", participantId }, error: null };
+  if (subject.type === "participant") {
+    return { subject: { type: "participant" }, error: null };
   }
-  const normalizedSubmissionId = taskString(submissionId);
-  return normalizedSubmissionId
-    ? {
-        subject: { type: "session", participantId, submissionId: normalizedSubmissionId },
-        error: null,
-      }
-    : { subject: null, error: "Task subject metadata is missing a session or participant scope." };
+  const sessionId = taskString(subject.sessionId);
+  return subject.type === "session" && sessionId
+    ? { subject: { type: "session", sessionId }, error: null }
+    : { subject: null, error: "Task subject metadata is invalid." };
 }
 
 export interface TaskSubjectPresentation {
@@ -74,7 +48,6 @@ export interface TaskSubjectPresentation {
 export function taskSubjectPresentation(
   task: PortalTask,
   profiles: readonly PortalProfile[],
-  submissions: readonly PortalSubmission[],
 ): TaskSubjectPresentation {
   const resolution = resolveTaskSubject(task);
   if (!resolution.subject) {
@@ -87,37 +60,27 @@ export function taskSubjectPresentation(
   if (resolution.subject.type === "participant") {
     const profile = profiles.find(
       (candidate) =>
-        candidate.eventId === task.eventId &&
-        candidate.participantId === resolution.subject.participantId,
+        candidate.eventId === task.eventId && candidate.participantId === task.participantId,
     );
     const name =
-      profile?.displayName ??
-      taskString(asTaskRecord(task)?.participantName) ??
-      resolution.subject.participantId;
+      profile?.displayName ?? taskString(asTaskRecord(task)?.participantName) ?? task.participantId;
     return {
       label: `Participant · ${name}`,
       description: "Applies to your participant profile across accepted sessions.",
       error: null,
     };
   }
-  const subject = resolution.subject;
-  const submission = submissions.find(
-    (candidate) =>
-      candidate.eventId === task.eventId &&
-      candidate.status === "accepted" &&
-      candidate.participantIds.includes(subject.participantId) &&
-      portalSubmissionIdsMatch(candidate.id, subject.submissionId),
-  );
-  return submission
+  const sessionTitle = taskString(asTaskRecord(task)?.sessionTitle);
+  return sessionTitle
     ? {
-        label: `Session · ${submission.title}`,
-        description: "Applies only to this accepted session.",
+        label: `Session · ${sessionTitle}`,
+        description: "Applies only to this accepted program session.",
         error: null,
       }
     : {
         label: "Session unavailable",
-        description: "The accepted session could not be found.",
-        error: "This session-scoped task has no matching accepted submission.",
+        description: "The accepted program session could not be found.",
+        error: "This session-scoped task has no matching accepted program session.",
       };
 }
 

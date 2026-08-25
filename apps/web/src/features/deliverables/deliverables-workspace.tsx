@@ -1281,26 +1281,16 @@ function useDeliverablesWorkspaceController({
         dispatch({ type: "asset-history-error", value: null });
         dispatch({ type: "comments-error", value: null });
         const getAssetHistory = api.getAssetHistory;
-        const listAssetComments = api.listAssetComments;
         const historyPromise =
           getAssetHistory === undefined
             ? Promise.resolve<readonly DeliverableAssetHistoryEntry[]>([])
             : startDeliverablesRequest(() => getAssetHistory(selected.id, controller.signal));
-        const commentsPromise =
-          listAssetComments === undefined
-            ? Promise.resolve<readonly DeliverableComment[]>([])
-            : startDeliverablesRequest(() => listAssetComments(selected.id, controller.signal));
         const historySettled = settleDeliverablesRequest(historyPromise).then((result) => {
           if (!isCurrent() || result === undefined) return;
           if (result.ok) dispatch({ type: "asset-history", value: result.value });
           else dispatch({ type: "asset-history-error", value: messageFromError(result.reason) });
         });
-        const commentsSettled = settleDeliverablesRequest(commentsPromise).then((result) => {
-          if (!isCurrent() || result === undefined) return;
-          if (result.ok) dispatch({ type: "comments", value: result.value });
-          else dispatch({ type: "comments-error", value: messageFromError(result.reason) });
-        });
-        completion = Promise.all([historySettled, commentsSettled]);
+        completion = historySettled;
       }
     }
     void completion.finally(() =>
@@ -1934,11 +1924,33 @@ function useDeliverablesWorkspaceController({
     speakerContentHistory: renderedSpeakerContentHistory,
     ...(api?.createTask === undefined ? {} : { onCreateTask: createTask }),
     onInspectAsset: (assetId: string) => {
+      selectedAssetIdRef.current = assetId;
       dispatch({ type: "asset-history", value: [] });
       dispatch({ type: "comments", value: [] });
       dispatch({ type: "asset-history-error", value: null });
       dispatch({ type: "comments-error", value: null });
       setSelectedAssetId(assetId);
+      const listAssetComments = api.listAssetComments;
+      if (listAssetComments !== undefined) {
+        const scope = scopeRef.current;
+        void startDeliverablesRequest(() => listAssetComments(assetId))
+          .then((value) => {
+            if (
+              selectedAssetIdRef.current === assetId &&
+              isDeliverablesWorkspaceScopeCurrent(scope, scopeRef.current)
+            ) {
+              dispatch({ type: "comments", value });
+            }
+          })
+          .catch((reason: unknown) => {
+            if (
+              selectedAssetIdRef.current === assetId &&
+              isDeliverablesWorkspaceScopeCurrent(scope, scopeRef.current)
+            ) {
+              dispatch({ type: "comments-error", value: messageFromError(reason) });
+            }
+          });
+      }
     },
     ...(!renderedStateIsCurrent || selectedSessionId === null ? {} : { selectedSessionId }),
     ...(visibleSessionHistory === undefined ? {} : { sessionHistory: visibleSessionHistory }),

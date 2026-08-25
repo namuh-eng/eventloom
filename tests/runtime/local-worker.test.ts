@@ -1106,10 +1106,9 @@ describe.sequential("composed local Worker", () => {
       headers: speakerHeaders,
     });
     const portal = await jsonData<{
-      submissions: Array<{ id: string; participantIds: string[]; status: string }>;
       tasks: Array<{
         id: string;
-        submissionId: string | null;
+        subject: { type: "participant" } | { type: "session"; sessionId: string };
         participantId: string;
         type: string;
         allowedMimeTypes?: string[];
@@ -1124,17 +1123,8 @@ describe.sequential("composed local Worker", () => {
         task.allowedMimeTypes?.includes("application/pdf") === true &&
         task.acceptedAssetKinds?.includes("slides") === true,
     );
-    if (uploadTask === undefined || uploadTask.submissionId === null) {
-      throw new Error("The featured accepted submission needs a canonical slides upload task.");
-    }
-    const acceptedSubmission = portal.submissions.find(
-      (submission) =>
-        `speaker-submission:${submission.id}` === uploadTask.submissionId &&
-        submission.status === "accepted" &&
-        submission.participantIds.includes(uploadTask.participantId),
-    );
-    if (acceptedSubmission === undefined) {
-      throw new Error("The upload task must belong to the current accepted speaker submission.");
+    if (uploadTask === undefined || uploadTask.subject.type !== "session") {
+      throw new Error("The featured accepted session needs a canonical slides upload task.");
     }
     expect(uploadTask.maxBytes).toEqual(expect.any(Number));
     expect(Number.isFinite(uploadTask.maxBytes)).toBe(true);
@@ -1142,7 +1132,7 @@ describe.sequential("composed local Worker", () => {
     const fileBody = "deterministic local speaker bytes";
     const uploadPayload = {
       participantId: uploadTask.participantId,
-      submissionId: acceptedSubmission.id,
+      sessionId: uploadTask.subject.sessionId,
       taskId: uploadTask.id,
       kind: "slides" as const,
       fileName: "local-speaker-slides.pdf",

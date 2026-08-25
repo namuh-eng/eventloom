@@ -257,6 +257,100 @@ describe("D1 agenda repository commands", () => {
     );
     expect(speakerProjection?.bound.query).not.toContain("COALESCE(display_name,speaker_id)");
   });
+  it("fails closed when reloading session content approval eligibility", async () => {
+    const root = {
+      state_version: 1,
+      time_zone: "UTC",
+      minimum_travel_minutes: 0,
+      validated_draft_version: null,
+      validated_at: null,
+      current_published_revision_id: null,
+    };
+    const draft = {
+      version: 1,
+      time_zone: "UTC",
+      updated_at: "2026-08-13T12:00:00.000Z",
+      updated_by: "organizer-1",
+    };
+    const sessionRows = [
+      {
+        id: "approved",
+        title: "Approved",
+        status: "accepted",
+        content_status: "Approved",
+        participant_ids_json: "[]",
+        resource_ids_json: "[]",
+        speaker_names_json: "[]",
+        track_ids_json: "[]",
+        capacity_required: 0,
+        duration_minutes: 30,
+        description: "",
+        format_name: "Talk (40 min)",
+      },
+      {
+        id: "needs-changes",
+        title: "Needs changes",
+        status: "accepted",
+        content_status: "Needs changes",
+        participant_ids_json: "[]",
+        resource_ids_json: "[]",
+        speaker_names_json: "[]",
+        track_ids_json: "[]",
+        capacity_required: 0,
+        duration_minutes: 30,
+        description: "",
+        format_name: "Lightning Talk (10 min)",
+      },
+      {
+        id: "unknown",
+        title: "Unknown",
+        status: "accepted",
+        content_status: null,
+        participant_ids_json: "[]",
+        resource_ids_json: "[]",
+        speaker_names_json: "[]",
+        track_ids_json: "[]",
+        capacity_required: 0,
+        duration_minutes: 30,
+        description: "",
+        format_name: "",
+      },
+    ];
+    const db = {
+      prepare(query: string) {
+        return {
+          bind() {
+            return this;
+          },
+          async first() {
+            if (query.includes("FROM agenda_states")) return root;
+            if (query.includes("FROM agenda_drafts")) return draft;
+            return null;
+          },
+          async all() {
+            return { results: query.includes("FROM sessions s") ? sessionRows : [] };
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const state = await new D1AgendaRepository(db, "org-1").load("event-1");
+
+    expect(
+      state?.sessions.map(({ id, publicApprovalEligible, format }) => ({
+        id,
+        publicApprovalEligible,
+        format,
+      })),
+    ).toEqual([
+      { id: "approved", publicApprovalEligible: true, format: "Talk (40 min)" },
+      {
+        id: "needs-changes",
+        publicApprovalEligible: false,
+        format: "Lightning Talk (10 min)",
+      },
+      { id: "unknown", publicApprovalEligible: false, format: "" },
+    ]);
+  });
   it("uses the loaded aggregate and avoids rewriting unchanged suggestion history", async () => {
     const db = database();
     const repository = new D1AgendaRepository(db, "org-1");
@@ -308,5 +402,65 @@ describe("D1 agenda repository commands", () => {
       db.statements.filter((item) => item.bound.query.includes("UPDATE agenda_suggestion_runs")),
     ).toHaveLength(0);
     expect(db.statements.length).toBeLessThan(30);
+  });
+  it("rewrites draft entries when only publication metadata changes", async () => {
+    const db = database();
+    const repository = new D1AgendaRepository(db, "org-1");
+    const current = agendaState(1, "2026-08-13T12:00:00.000Z", "user-1");
+    const entry = {
+      id: "entry-1",
+      sessionId: "session-1",
+      roomId: "room-1",
+      trackIds: ["track-1"],
+      startsAt: "2026-08-13T09:00:00.000Z",
+      endsAt: "2026-08-13T10:00:00.000Z",
+      startsAtLocal: "2026-08-13T09:00",
+      endsAtLocal: "2026-08-13T10:00",
+      timeZone: "UTC",
+      metadata: {
+        title: "Session",
+        summary: "Abstract",
+        format: "Session",
+        speakerNames: ["Speaker"],
+        roomName: "Room",
+        trackNames: ["Track"],
+      },
+    };
+    current.draft.entries = [entry];
+
+    const next: AgendaState = {
+      ...current,
+      stateVersion: 2,
+      draft: {
+        ...current.draft,
+        version: 2,
+        updatedAt: "2026-08-13T12:01:00.000Z",
+        entries: [
+          {
+            ...entry,
+            metadata: {
+              ...entry.metadata,
+              format: "Talk (40 min)",
+              speakerNames: ["Priya Raman"],
+            },
+          },
+        ],
+      },
+    };
+
+    await repository.compareAndSwap("event-1", 1, next, { priorState: current });
+
+    expect(
+      db.statements.some(
+        (item) =>
+          item.bound.query.includes("DELETE FROM agenda_entries") &&
+          item.bound.query.includes("container_type='draft'"),
+      ),
+    ).toBe(true);
+    const insert = db.statements.find((item) =>
+      item.bound.query.includes("INSERT INTO agenda_entries"),
+    );
+    expect(insert?.bound.values).toContain("Talk (40 min)");
+    expect(insert?.bound.values).toContain(JSON.stringify(["Priya Raman"]));
   });
 });

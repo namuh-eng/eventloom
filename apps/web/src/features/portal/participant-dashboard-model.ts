@@ -326,8 +326,8 @@ function selectedAuthorizedParticipantId(context: PortalContext): string | null 
 }
 
 /**
- * Scopes tasks to the selected, authorized speaker and their authorized submissions. Participant-
- * scoped tasks are retained because their null submission ID is an explicit portal contract.
+ * Scopes tasks to the selected, authorized speaker. Tasks are already account- and capability-
+ * authorized by the server; their optional session subjects are program identity, not CFP authority.
  */
 export function selectParticipantDashboardTasks(
   context: PortalContext,
@@ -335,22 +335,12 @@ export function selectParticipantDashboardTasks(
 ): PortalTask[] {
   const eventId = normalizedEventId(context);
   const participantId = selectedAuthorizedParticipantId(context);
-  if (eventId === null || participantId === null) return [];
+  if (eventId === null || participantId === null || !hasTaskResponseCapability(context)) return [];
 
-  return tasks.filter((task) => {
-    if (
-      task.eventId !== eventId ||
-      task.owner !== "speaker" ||
-      task.participantId !== participantId
-    ) {
-      return false;
-    }
-    const taskSubmissionId = task.submissionId;
-    if (taskSubmissionId === null) return true;
-    return context.submissionIds.some((submissionId) =>
-      portalSubmissionIdsMatch(submissionId, taskSubmissionId),
-    );
-  });
+  return tasks.filter(
+    (task) =>
+      task.eventId === eventId && task.owner === "speaker" && task.participantId === participantId,
+  );
 }
 
 /**

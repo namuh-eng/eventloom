@@ -13,6 +13,7 @@ const MUTATION_TIMESTAMPS = [
 function createSeedView(eventId: string): PortalView {
   const participantId = "demo-participant-ada";
   const submissionId = "demo-submission-resilient-events";
+  const sessionId = "demo-session-resilient-events";
 
   return {
     submissions: [
@@ -49,7 +50,7 @@ function createSeedView(eventId: string): PortalView {
       {
         id: "demo-task-agreement",
         eventId,
-        submissionId,
+        subject: { type: "session", sessionId },
         participantId,
         type: "action",
         owner: "speaker",
@@ -65,7 +66,7 @@ function createSeedView(eventId: string): PortalView {
       {
         id: "demo-task-headshot",
         eventId,
-        submissionId,
+        subject: { type: "session", sessionId },
         participantId,
         type: "upload",
         owner: "speaker",
@@ -82,7 +83,7 @@ function createSeedView(eventId: string): PortalView {
       {
         id: "demo-task-slides",
         eventId,
-        submissionId,
+        subject: { type: "session", sessionId },
         participantId,
         type: "upload",
         owner: "speaker",
@@ -99,7 +100,7 @@ function createSeedView(eventId: string): PortalView {
       {
         id: "demo-task-profile",
         eventId,
-        submissionId,
+        subject: { type: "session", sessionId },
         participantId,
         type: "form",
         owner: "speaker",
@@ -285,7 +286,24 @@ export function createLocalPortalDemoApi(eventId: string): PortalApi {
           400,
         );
       }
-      return { assetId: `demo-asset-${task.id}-${input.kind}` };
+      const assetId = `demo-asset-${task.id}-${input.kind}`;
+      return {
+        id: assetId,
+        eventId: input.eventId,
+        ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+        participantId: input.participantId,
+        taskId: input.taskId,
+        kind: input.kind,
+        fileName: input.file.name,
+        contentType: input.file.type || "application/octet-stream",
+        sizeBytes: input.file.size,
+        state: "pending_upload",
+        createdAt: mutationTimestamp(),
+        version: 1,
+        versionFamilyId: assetId,
+        versionId: assetId,
+        latestVersionId: assetId,
+      };
     },
   };
 }

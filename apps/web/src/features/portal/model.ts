@@ -1,7 +1,7 @@
 import {
   getCfpActiveSubmissionStorageKey,
-  getCfpSubmissionPointerStorageKey,
   getCfpNewSubmissionIntentStorageKey,
+  getCfpSubmissionPointerStorageKey,
 } from "../cfp/draft-persistence";
 import { getCfpStepRoute } from "../cfp/routes";
 import type {
@@ -189,19 +189,6 @@ export function filterTasks(tasks: readonly PortalTask[], filter: TaskFilter): P
   return [...tasks];
 }
 
-export function findSubmissionForTask(task: PortalTask, submissions: readonly PortalSubmission[]) {
-  if (task.submissionId === null) {
-    return undefined;
-  }
-  const submissionId = task.submissionId;
-  return submissions.find(
-    (submission) =>
-      submission.eventId === task.eventId &&
-      submission.participantIds.includes(task.participantId) &&
-      portalSubmissionIdsMatch(submission.id, submissionId),
-  );
-}
-
 function normalizedIds(values: readonly string[]): string[] {
   const seen = new Set<string>();
   return values.reduce<string[]>((normalized, value) => {
@@ -348,26 +335,33 @@ export function scopePortalViewToAuthorizedParticipants(
     return filtered;
   }, []);
   const tasks =
-    selectedParticipant === null
+    selectedParticipant === null || !scopedContext.capabilities.includes("task-response")
       ? []
       : view.tasks.filter(
           (task) =>
             task.eventId === eventId &&
             task.owner === "speaker" &&
-            task.participantId === selectedParticipant &&
-            (task.submissionId === null || submissionMatches(task.submissionId)),
+            task.participantId === selectedParticipant,
         );
-  const taskIds = new Set(tasks.map((task) => task.id));
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
   const assets =
     selectedParticipant === null
       ? []
-      : (view.assets ?? []).filter(
-          (asset) =>
-            asset.eventId === eventId &&
-            asset.participantId === selectedParticipant &&
-            (asset.taskId === undefined || taskIds.has(asset.taskId)) &&
-            (asset.submissionId === undefined || submissionMatches(asset.submissionId)),
-        );
+      : (view.assets ?? []).filter((asset) => {
+          if (asset.eventId !== eventId || asset.participantId !== selectedParticipant) {
+            return false;
+          }
+          if (asset.taskId === undefined) {
+            return true;
+          }
+          const task = taskById.get(asset.taskId);
+          return (
+            task !== undefined &&
+            (task.subject.type === "participant"
+              ? asset.sessionId === undefined
+              : asset.sessionId === task.subject.sessionId)
+          );
+        });
 
   return {
     submissions,
@@ -426,21 +420,11 @@ export function scopePortalViewToPrimaryParticipant(
     submission.participantIds.includes(primaryParticipantId),
   );
   const submissionIds = submissions.map((submission) => submission.id);
-  const matches = (submissionId: string | null): boolean =>
-    submissionId !== null &&
-    submissionIds.some((authorizedId) => portalSubmissionIdsMatch(authorizedId, submissionId));
-  const tasks = scoped.tasks.filter((task) => matches(task.submissionId));
-  const taskIds = new Set(tasks.map((task) => task.id));
-  const assets = (scoped.assets ?? []).filter(
-    (asset) =>
-      (asset.taskId === undefined || taskIds.has(asset.taskId)) &&
-      (asset.submissionId === undefined || matches(asset.submissionId)),
-  );
+  const tasks = scoped.tasks;
   return {
     ...scoped,
     submissions,
     tasks,
-    assets,
     outstandingTaskCount: tasks.filter((task) => !isTaskFinished(task)).length,
     context: scopePortalContextToPrimaryParticipant(scopedContext, submissionIds),
   };
@@ -516,10 +500,9 @@ export function portalTaskAsset(
       asset.taskId === task.id &&
       asset.eventId === task.eventId &&
       asset.participantId === task.participantId &&
-      (task.submissionId === null
-        ? asset.submissionId === undefined
-        : asset.submissionId === undefined ||
-          portalSubmissionIdsMatch(asset.submissionId, task.submissionId)),
+      (task.subject.type === "participant"
+        ? asset.sessionId === undefined
+        : asset.sessionId === task.subject.sessionId),
   );
   return candidates.reduce<PortalAsset | undefined>((latest, candidate) => {
     if (latest === undefined) {

@@ -95,14 +95,15 @@ export function taskMutationMatches(
   eventId: string,
   expectedStatus: PortalTaskStatus,
 ): boolean {
-  const sameSubmission =
-    updated.submissionId === null || original.submissionId === null
-      ? updated.submissionId === original.submissionId
-      : portalSubmissionIdsMatch(updated.submissionId, original.submissionId);
+  const sameSubject =
+    updated.subject.type === "participant"
+      ? original.subject.type === "participant"
+      : original.subject.type === "session" &&
+        updated.subject.sessionId === original.subject.sessionId;
   return (
     updated.id === original.id &&
     updated.eventId === eventId &&
-    sameSubmission &&
+    sameSubject &&
     updated.participantId === original.participantId &&
     updated.owner === "speaker" &&
     updated.status === expectedStatus &&
@@ -298,9 +299,9 @@ export function taskBelongsToPortalContext(task: PortalTask, target: PortalConte
   return (
     task.eventId === target.eventId &&
     target.primaryParticipantId !== undefined &&
+    target.capabilities.includes("task-response") &&
     task.owner === "speaker" &&
-    task.participantId === target.primaryParticipantId &&
-    (task.submissionId === null || submissionIdAuthorized(target, task.submissionId))
+    task.participantId === target.primaryParticipantId
   );
 }
 
@@ -312,21 +313,34 @@ export function assetBelongsToPortalContext(
   if (
     asset.eventId !== target.eventId ||
     target.primaryParticipantId === undefined ||
-    asset.participantId !== target.primaryParticipantId ||
-    (asset.submissionId !== undefined && !submissionIdAuthorized(target, asset.submissionId))
+    asset.participantId !== target.primaryParticipantId
   ) {
     return false;
   }
   if (asset.taskId === undefined) {
-    return true;
+    return (
+      profileAssetBelongsToPortalContext(asset, target) ||
+      (asset.sessionId !== undefined &&
+        asset.kind !== "headshot" &&
+        tasks.some(
+          (task) =>
+            taskBelongsToPortalContext(task, target) &&
+            task.type === "upload" &&
+            task.subject.type === "session" &&
+            task.subject.sessionId === asset.sessionId &&
+            task.acceptedAssetKinds?.includes(asset.kind) === true,
+        ))
+    );
   }
   const task = tasks.find((candidate) => candidate.id === asset.taskId);
   return (
     task !== undefined &&
     taskBelongsToPortalContext(task, target) &&
-    (task.submissionId === null ||
-      asset.submissionId === undefined ||
-      portalSubmissionIdsMatch(asset.submissionId, task.submissionId))
+    task.type === "upload" &&
+    task.acceptedAssetKinds?.includes(asset.kind) === true &&
+    (task.subject.type === "participant"
+      ? asset.sessionId === undefined
+      : asset.sessionId === task.subject.sessionId)
   );
 }
 
@@ -338,8 +352,8 @@ export function profileAssetBelongsToPortalContext(
     asset.eventId === target.eventId &&
     asset.participantId === target.primaryParticipantId &&
     asset.kind === "headshot" &&
-    asset.taskId === undefined &&
-    (asset.submissionId === undefined || submissionIdAuthorized(target, asset.submissionId))
+    asset.sessionId === undefined &&
+    asset.taskId === undefined
   );
 }
 export function acceptedSubmissionId(
@@ -366,6 +380,33 @@ export function assetIdAuthorized(
     workspaceAssets.find((candidate) => candidate.id === assetId) ??
     view?.assets?.find((candidate) => candidate.id === assetId);
   return asset !== undefined && assetBelongsToPortalContext(asset, target, view?.tasks ?? []);
+}
+
+export function assetFamilyCommentResponseAuthorized(
+  requestedAssetId: string,
+  commentAssetId: string,
+  commentVersionId: string,
+  target: PortalContext,
+  view: PortalView | null,
+  workspaceAssets: readonly PortalAsset[],
+): boolean {
+  const assets = [
+    ...new Map(
+      [...workspaceAssets, ...(view?.assets ?? [])].map((asset) => [asset.id, asset]),
+    ).values(),
+  ];
+  const requested = assets.find((asset) => asset.id === requestedAssetId);
+  const commented = assets.find(
+    (asset) => asset.id === commentAssetId && (asset.versionId ?? asset.id) === commentVersionId,
+  );
+  return (
+    requested !== undefined &&
+    commented !== undefined &&
+    requested.versionFamilyId !== undefined &&
+    requested.versionFamilyId === commented.versionFamilyId &&
+    assetBelongsToPortalContext(requested, target, view?.tasks ?? []) &&
+    assetBelongsToPortalContext(commented, target, view?.tasks ?? [])
+  );
 }
 export function taskIdAuthorized(
   taskId: string,

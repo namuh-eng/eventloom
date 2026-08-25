@@ -82,15 +82,19 @@ export function SessionsWorkspaceView({
   onRemoveCoSpeaker,
 }: SessionsWorkspaceViewProps) {
   const selected = sessions.find((session) => session.id === selectedSessionId) ?? null;
-  const scopedTasks = selected ? tasks.filter((task) => task.submissionId === selected.id) : [];
-  const scopedAssets = selected ? assets.filter((asset) => asset.submissionId === selected.id) : [];
+  const scopedTasks = selected
+    ? tasks.filter(
+        (task) => task.subject.type === "session" && task.subject.sessionId === selected.id,
+      )
+    : [];
+  const scopedAssets = selected ? assets.filter((asset) => asset.sessionId === selected.id) : [];
 
   return (
     <div className={styles.page}>
       <WorkspaceHeader
         eyebrow="Accepted speaker workspace"
         title="Sessions"
-        description="Choose an accepted proposal before reviewing its identity, authorized speakers, tasks, and files."
+        description="Choose an accepted session before reviewing its identity, authorized speakers, tasks, and files."
         metadata={
           <>
             <span>{eventName}</span>
@@ -129,13 +133,13 @@ export function SessionsWorkspaceView({
           detail={
             selected ? (
               <div className={styles.detail}>
-                <WorkspaceSurface title={selected.title} description="Accepted proposal identity">
+                <WorkspaceSurface title={selected.title} description="Accepted session identity">
                   <div className={styles.surfaceBody}>
                     <StatusBadge tone="success">Accepted</StatusBadge>
                     <MetadataList>
                       <MetadataRow label="Session ID" value={selected.id} />
                       <MetadataRow
-                        label="Proposal version"
+                        label="Session version"
                         value={selected.version ?? "Unavailable"}
                       />
                       <MetadataRow

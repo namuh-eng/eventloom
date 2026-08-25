@@ -1135,9 +1135,18 @@ export class SessionService {
           reference.displayName !== previous.displayName
         );
       });
+    const publicContentChanged =
+      copyChanged ||
+      speakerContentChanged ||
+      (input.durationMinutes !== undefined &&
+        duration(input.durationMinutes) !== current.durationMinutes) ||
+      (input.formatId !== undefined && normalized.formatId !== current.formatId) ||
+      (trackReferencesSupplied &&
+        (nextTrackIds.length !== current.trackIds.length ||
+          nextTrackIds.some((id, index) => id !== current.trackIds[index])));
     const nextContentStatus =
       requestedContentStatus ??
-      (copyChanged || speakerContentChanged
+      (publicContentChanged
         ? "Needs changes"
         : (currentContentStatus ?? (sameStatus(nextStatus, "Accepted") ? "Approved" : undefined)));
     const nextRoomId = input.roomId === undefined ? current.roomId : normalized.roomId;
@@ -1753,16 +1762,18 @@ export class SessionService {
     };
   }
 
-  /** Existing agenda adapter, projected from the authoritative published-content handoff. */
+  /** Private scheduling catalog for agenda planning; publication uses getPublishedSessionContent. */
   async getAgendaCatalog(tenantId: string, eventId: string) {
     const organizationId = resourceId(tenantId, "tenant id");
     const scopedEventId = this.event(eventId);
-    const [content, rooms, tracks, formats] = await Promise.all([
-      this.getPublishedSessionContent(organizationId, scopedEventId),
+    const [settings, sessions, rooms, tracks, formats] = await Promise.all([
+      this.readSettings(organizationId, scopedEventId),
+      this.#repository.listSessions(organizationId, scopedEventId),
       this.#repository.listRooms(organizationId, scopedEventId),
       this.#repository.listTracks(organizationId, scopedEventId),
       this.#repository.listFormats(organizationId, scopedEventId),
     ]);
+    const eligibleStatuses = settings?.agendaEligibleStatuses ?? defaultAgendaEligibleStatuses;
     const roomById = new Map(
       rooms
         .filter((room) => this.inScope(room, organizationId, scopedEventId))
@@ -1779,28 +1790,37 @@ export class SessionService {
         .map((format) => [format.id, format]),
     );
     return {
-      sessions: content.sessions.map((session) => ({
-        id: session.id,
-        title: session.title,
-        status: "accepted" as const,
-        participantIds: [...session.speakerIds],
-        resourceIds: [...session.resourceIds],
-        capacityRequired: session.capacityRequired,
-        durationMinutes: session.durationMinutes,
-        summary: session.abstract,
-        format:
-          session.formatId === undefined
-            ? "Session"
-            : (formatById.get(session.formatId)?.name ?? "Session"),
-        speakerNames: [...session.speakerNames],
-        ...(session.roomId === undefined
-          ? {}
-          : { roomName: roomById.get(session.roomId)?.name ?? "Room to be announced" }),
-        trackNames: session.trackIds.flatMap((trackId) => {
-          const name = trackById.get(trackId)?.name;
-          return name === undefined ? [] : [name];
-        }),
-      })),
+      sessions: sessions
+        .filter(
+          (session) =>
+            this.inScope(session, organizationId, scopedEventId) &&
+            hasStatus(session.status, eligibleStatuses),
+        )
+        .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+        .map((session) => ({
+          id: session.id,
+          title: session.title,
+          status: "accepted" as const,
+          publicApprovalEligible: sessionIsPubliclyApproved(session),
+          participantIds: [...session.speakerIds],
+          resourceIds: [...session.resourceIds],
+          capacityRequired: session.capacityRequired,
+          durationMinutes: session.durationMinutes,
+          summary: session.description,
+          format:
+            session.formatId === undefined
+              ? "Session"
+              : (formatById.get(session.formatId)?.name ?? "Session"),
+          speakerNames: sessionSpeakerNames(session),
+          ...(session.roomId === undefined
+            ? {}
+            : { roomName: roomById.get(session.roomId)?.name ?? "Room to be announced" }),
+          trackIds: [...session.trackIds],
+          trackNames: session.trackIds.flatMap((trackId) => {
+            const name = trackById.get(trackId)?.name;
+            return name === undefined ? [] : [name];
+          }),
+        })),
       rooms: [...roomById.values()].map((room) => ({
         id: room.id,
         name: room.name,
