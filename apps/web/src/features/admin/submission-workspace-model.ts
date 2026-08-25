@@ -352,6 +352,10 @@ export interface OrganizerEvaluationWorkspace {
 export interface OrganizerEvaluationIndex {
   readonly plan: OrganizerEvaluationWorkspace["plan"];
   readonly round: OrganizerEvaluationWorkspace["plan"]["rounds"][number] | undefined;
+  readonly roundBySubmissionId: ReadonlyMap<
+    string,
+    OrganizerEvaluationWorkspace["plan"]["rounds"][number]
+  >;
   readonly assignmentsBySubmissionId: ReadonlyMap<
     string,
     OrganizerEvaluationWorkspace["assignments"]
@@ -728,14 +732,36 @@ export async function loadOrganizerEvaluationDecision(
 export function indexOrganizerEvaluationWorkspace(
   workspace: OrganizerEvaluationWorkspace,
 ): OrganizerEvaluationIndex {
-  const round = [...workspace.plan.rounds].sort(
-    (left, right) => (right.sequence ?? 0) - (left.sequence ?? 0),
-  )[0];
+  const rounds = [...workspace.plan.rounds].sort(
+    (left, right) =>
+      (left.sequence ?? 0) - (right.sequence ?? 0) || left.id.localeCompare(right.id),
+  );
+  const round = rounds[0];
+  const roundsById = new Map(rounds.map((candidate) => [candidate.id, candidate]));
+  const roundBySubmissionId = new Map<
+    string,
+    OrganizerEvaluationWorkspace["plan"]["rounds"][number]
+  >();
+  for (const assignment of workspace.assignments) {
+    if (assignment.status === "abstained") continue;
+    const candidate = roundsById.get(assignment.roundId);
+    if (candidate === undefined) continue;
+    const current = roundBySubmissionId.get(assignment.submissionId);
+    if (
+      current === undefined ||
+      (candidate.sequence ?? 0) > (current.sequence ?? 0) ||
+      ((candidate.sequence ?? 0) === (current.sequence ?? 0) && candidate.id > current.id)
+    ) {
+      roundBySubmissionId.set(assignment.submissionId, candidate);
+    }
+  }
   const assignmentsBySubmissionId = new Map<
     string,
     OrganizerEvaluationWorkspace["assignments"][number][]
   >();
   for (const assignment of workspace.assignments) {
+    const selectedRound = roundBySubmissionId.get(assignment.submissionId) ?? round;
+    if (selectedRound?.id !== assignment.roundId) continue;
     const current = assignmentsBySubmissionId.get(assignment.submissionId) ?? [];
     current.push(assignment);
     assignmentsBySubmissionId.set(assignment.submissionId, current);
@@ -744,16 +770,16 @@ export function indexOrganizerEvaluationWorkspace(
     string,
     OrganizerEvaluationWorkspace["aggregates"][number]
   >();
-  if (round !== undefined) {
-    for (const aggregate of workspace.aggregates) {
-      if (aggregate.roundId === round.id) {
-        aggregateBySubmissionId.set(aggregate.submissionId, aggregate);
-      }
+  for (const aggregate of workspace.aggregates) {
+    const selectedRound = roundBySubmissionId.get(aggregate.submissionId) ?? round;
+    if (aggregate.roundId === selectedRound?.id) {
+      aggregateBySubmissionId.set(aggregate.submissionId, aggregate);
     }
   }
   return {
     plan: workspace.plan,
     round,
+    roundBySubmissionId,
     assignmentsBySubmissionId,
     aggregateBySubmissionId,
     decisions: workspace.decisions,
@@ -869,9 +895,7 @@ export async function enrichCanonicalSubmission(
   try {
     const workspace = await loadOrganizerEvaluationWorkspace(baseUrl, envelope.submission.eventId);
     const index = indexOrganizerEvaluationWorkspace(workspace);
-    const roundId =
-      workspace.assignments.find((assignment) => assignment.submissionId === envelope.submission.id)
-        ?.roundId ?? index.round?.id;
+    const roundId = index.roundBySubmissionId.get(envelope.submission.id)?.id ?? index.round?.id;
     const [submittedReviewResult, reviewerMembers] = await Promise.all([
       roundId === undefined
         ? Promise.resolve({ reviews: [], error: null })

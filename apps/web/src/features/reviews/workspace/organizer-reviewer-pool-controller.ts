@@ -24,6 +24,8 @@ interface OrganizerReviewerPoolOptions {
   readonly reviewers: readonly OrganizationMember[];
   readonly defaultMaxAssignments: number;
   readonly onSaved?: (() => Promise<void>) | undefined;
+  readonly onSaveStart?: (() => boolean | undefined) | undefined;
+  readonly onSaveFinished?: (() => void) | undefined;
 }
 
 function poolDraft(pool: ReviewerPool | null): ReviewerPoolDraft {
@@ -52,6 +54,8 @@ export function useOrganizerReviewerPool({
   reviewers,
   defaultMaxAssignments,
   onSaved,
+  onSaveStart,
+  onSaveFinished,
 }: OrganizerReviewerPoolOptions) {
   const resolvedOrganizationId = organizationId?.trim() ?? "";
   const resolvedEventId = eventId.trim();
@@ -175,11 +179,14 @@ export function useOrganizerReviewerPool({
     }
     const sequence = saveSequenceRef.current + 1;
     const requestedScope = scopeKey;
+    let saveStartAttempted = false;
     saveSequenceRef.current = sequence;
     setSaving(true);
-    setError(null);
-    setMessage(null);
     try {
+      saveStartAttempted = true;
+      if (onSaveStart?.() === false) return;
+      setError(null);
+      setMessage(null);
       const nextPool = await memberApi.setReviewerPool(
         resolvedEventId,
         resolvedRoundId,
@@ -197,7 +204,20 @@ export function useOrganizerReviewerPool({
         setError(reviewerPoolError(reason));
       }
     } finally {
-      setSaving((current) => (saveSequenceRef.current === sequence ? false : current));
+      let finishError: unknown;
+      if (saveStartAttempted) {
+        try {
+          onSaveFinished?.();
+        } catch (reason: unknown) {
+          finishError = reason;
+        }
+      }
+      if (saveSequenceRef.current === sequence) {
+        setSaving(false);
+        if (finishError !== undefined && currentScopeRef.current === requestedScope) {
+          setError(reviewerPoolError(finishError));
+        }
+      }
     }
   }
 

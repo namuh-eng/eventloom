@@ -8,10 +8,11 @@ import {
   SubmissionListWorkspace,
 } from "./submission-workspace";
 import {
-  DECISION_COMMITTED_WITHOUT_DELIVERY_MESSAGE,
   createEvaluationDecisionAttempt,
+  DECISION_COMMITTED_WITHOUT_DELIVERY_MESSAGE,
   decisionAttemptMatches,
   decisionNotificationSummary,
+  type EvaluationDecisionRecord,
   enrichCanonicalSubmission,
   getAcceptedHandoffMetadata,
   indexOrganizerEvaluationWorkspace,
@@ -22,9 +23,8 @@ import {
   loadOrganizerEventName,
   mapCanonicalSubmission,
   mergeCanonicalSubmissionEvaluation,
-  reconcileEvaluationDecisionFailure,
-  type EvaluationDecisionRecord,
   type OrganizerEvaluationWorkspace,
+  reconcileEvaluationDecisionFailure,
   submissionListState,
   submissionLoadErrorMessage,
   submissionLoadFailure,
@@ -519,7 +519,7 @@ describe("organizer submission workspace", () => {
       fetchMock.mockRestore();
     }
   });
-  it("uses the same-origin gateway and keeps canonical submissions visible when aggregates fail", async () => {
+  it("uses the assigned Initial Review aggregate instead of an empty future round", async () => {
     const requests: string[] = [];
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -539,11 +539,20 @@ describe("organizer submission workspace", () => {
                 id: "assignment-1",
                 reviewerId: "reviewer-1",
                 submissionId: "submission-devflow-1",
+                roundId: "round-initial",
                 status: "submitted",
               },
             ],
             decisions: {},
             aggregates: [
+              {
+                submissionId: "submission-devflow-1",
+                roundId: "round-initial",
+                submittedReviewCount: 1,
+                expectedReviewCount: 1,
+                averageWeightedTotal: 11,
+                possibleWeightedTotal: 20,
+              },
               {
                 submissionId: "submission-devflow-1",
                 roundId: "round-final",
@@ -598,7 +607,7 @@ describe("organizer submission workspace", () => {
         id: "submission-devflow-1",
         title: "Taming 40-Minute CI: Incremental Builds at Monorepo Scale",
         evaluationPlanId: "plan-1",
-        reviewSummary: { completed: 0, total: 1, averageScore: null, maxScore: 0 },
+        reviewSummary: { completed: 1, total: 1, averageScore: 11, maxScore: 20 },
         reviewAssignments: [
           {
             reviewer: "Sam Whitfield",
@@ -617,6 +626,9 @@ describe("organizer submission workspace", () => {
       expect(requests.filter((request) => request.includes("/organizer/workspace"))).toHaveLength(
         1,
       );
+      expect(requests).toContain(
+        "/api/admin/evaluations/plans/plan-1/rounds/round-initial/submissions/submission-devflow-1/reviews",
+      );
       expect(requests.some((request) => request.includes("/plans?eventId="))).toBe(false);
       expect(requests.some((request) => request.endsWith("/assignments"))).toBe(false);
       expect(requests.some((request) => request.endsWith("/aggregate"))).toBe(false);
@@ -624,6 +636,104 @@ describe("organizer submission workspace", () => {
     } finally {
       fetchMock.mockRestore();
     }
+  });
+  it("moves detail review data to the highest assigned round", () => {
+    const workspace: OrganizerEvaluationWorkspace = {
+      plan: {
+        id: "plan-1",
+        rounds: [
+          { id: "round-initial", sequence: 1 },
+          { id: "round-final", sequence: 2 },
+        ],
+      },
+      assignments: [
+        {
+          id: "assignment-initial",
+          reviewerId: "reviewer-1",
+          submissionId: canonicalEnvelope.submission.id,
+          roundId: "round-initial",
+          status: "submitted",
+        },
+        {
+          id: "assignment-final",
+          reviewerId: "reviewer-2",
+          submissionId: canonicalEnvelope.submission.id,
+          roundId: "round-final",
+          status: "in_progress",
+        },
+      ],
+      aggregates: [
+        {
+          roundId: "round-initial",
+          submissionId: canonicalEnvelope.submission.id,
+          submittedReviewCount: 1,
+          expectedReviewCount: 1,
+          averageWeightedTotal: 11,
+          possibleWeightedTotal: 20,
+        },
+        {
+          roundId: "round-final",
+          submissionId: canonicalEnvelope.submission.id,
+          submittedReviewCount: 0,
+          expectedReviewCount: 2,
+          averageWeightedTotal: null,
+          possibleWeightedTotal: 30,
+        },
+      ],
+      decisions: {},
+    };
+
+    const submission = mergeCanonicalSubmissionEvaluation(
+      canonicalEnvelope,
+      indexOrganizerEvaluationWorkspace(workspace),
+    );
+
+    expect(submission.reviewSummary).toMatchObject({
+      completed: 0,
+      total: 2,
+      averageScore: null,
+      maxScore: 30,
+    });
+    expect(submission.reviewAssignments).toEqual([
+      expect.objectContaining({ status: "in_progress" }),
+    ]);
+  });
+  it("falls back to the initial round when a submission has no assignments", () => {
+    const submission = mergeCanonicalSubmissionEvaluation(
+      canonicalEnvelope,
+      indexOrganizerEvaluationWorkspace({
+        plan: {
+          id: "plan-1",
+          rounds: [
+            { id: "round-initial", sequence: 1 },
+            { id: "round-final", sequence: 2 },
+          ],
+        },
+        assignments: [],
+        aggregates: [
+          {
+            roundId: "round-initial",
+            submissionId: canonicalEnvelope.submission.id,
+            submittedReviewCount: 0,
+            expectedReviewCount: 0,
+            averageWeightedTotal: null,
+            possibleWeightedTotal: 20,
+          },
+          {
+            roundId: "round-final",
+            submissionId: canonicalEnvelope.submission.id,
+            submittedReviewCount: 0,
+            expectedReviewCount: 1,
+            averageWeightedTotal: null,
+            possibleWeightedTotal: 30,
+          },
+        ],
+        decisions: {},
+      }),
+    );
+
+    expect(submission.reviewSummary).toMatchObject({ total: 0, maxScore: 20 });
+    expect(submission.reviewAssignments).toEqual([]);
   });
   it("loads canonical titles independently of the event-wide evaluation batch", async () => {
     let releaseWorkspace: ((response: Response) => void) | undefined;
@@ -796,6 +906,7 @@ describe("organizer submission workspace", () => {
                 id: "assignment-1",
                 reviewerId: "reviewer-1",
                 submissionId: canonicalEnvelope.submission.id,
+                roundId: "round-final",
                 status: "submitted",
               },
             ],
