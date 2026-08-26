@@ -18,6 +18,7 @@ export function deriveOrganizerWorkspaceModel({
   selectedDecisionId,
   selectedRound,
   selectedRoundId,
+  resultScopeIsActive,
   reviewerMembers,
 }: {
   seed: ReviewPlanSeed;
@@ -29,6 +30,7 @@ export function deriveOrganizerWorkspaceModel({
   selectedDecisionId: string | null;
   selectedRound: ReviewPlanSeed["rounds"][number] | undefined;
   selectedRoundId: string;
+  resultScopeIsActive: boolean;
   reviewerMembers: readonly OrganizationMember[];
 }) {
   const sortedAggregates = [...roundAggregates].sort((left, right) => {
@@ -43,7 +45,7 @@ export function deriveOrganizerWorkspaceModel({
     return left.reference.localeCompare(right.reference);
   });
   const filteredDecisionRows = sortedAggregates.filter((aggregate) => {
-    const decision = seed.decisionBySubmission[aggregate.id];
+    const decision = resultScopeIsActive ? seed.decisionBySubmission[aggregate.id] : undefined;
     const matchesStatus =
       decisionFilter === "all"
         ? true
@@ -75,7 +77,7 @@ export function deriveOrganizerWorkspaceModel({
         seed.assignmentRule.reviewsPerSubmission,
         aggregate.expectedReviews,
       );
-      const decision = seed.decisionBySubmission[aggregate.id];
+      const decision = resultScopeIsActive ? seed.decisionBySubmission[aggregate.id] : undefined;
       let attentionKind: "none" | "assignment" | "completion" | "conflict" | "decision" = "none";
       let attentionLabel = "Complete";
       if (aggregate.conflicts > 0) {
@@ -96,7 +98,7 @@ export function deriveOrganizerWorkspaceModel({
         id: aggregate.id,
         reference: aggregate.reference,
         title: aggregate.title,
-        roundName: selectedRound?.name ?? "Round unavailable",
+        roundName: selectedRound?.name ?? selectedRoundId,
         assignedReviewerCount: reviewerIds.length,
         expectedReviewerCount: expectedReviewCount,
         completedReviewCount: aggregate.countedReviews,
@@ -113,11 +115,15 @@ export function deriveOrganizerWorkspaceModel({
         reviewerDisplayNames: reviewerIds.map((reviewerId) =>
           reviewerDisplayLabel(reviewerId, reviewerMembers),
         ),
-        manageable: true,
-        attentionAction:
-          attentionKind === "decision"
-            ? { label: "Record decision", target: "decisions" as const }
-            : { label: "Manage reviewers", target: "reviewers" as const },
+        manageable: resultScopeIsActive,
+        ...(resultScopeIsActive
+          ? {
+              attentionAction:
+                attentionKind === "decision"
+                  ? ({ label: "Record decision", target: "decisions" } as const)
+                  : ({ label: "Manage reviewers", target: "reviewers" } as const),
+            }
+          : {}),
       };
     })
     .sort(
@@ -140,7 +146,11 @@ export function deriveOrganizerWorkspaceModel({
     (row) => row.decisionLabel !== "Not decided",
   ).length;
   const overviewAttentionCount = overviewRows.filter((row) => row.attentionKind !== "none").length;
-  const overviewCompletionPercent = normalizeCompletionPercent(seed.progress.completionPercent);
+  const overviewCompletionPercent = normalizeCompletionPercent(
+    overviewExpectedReviewCount === 0
+      ? 0
+      : (overviewCompletedReviewCount / overviewExpectedReviewCount) * 100,
+  );
   const overviewMetrics = [
     {
       label: "Review window",

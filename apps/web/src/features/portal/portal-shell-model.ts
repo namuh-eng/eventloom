@@ -34,7 +34,7 @@ export function portalRouteAuthorized(input: {
   if (pathname.startsWith("/portal/submissions")) return true;
   if (pathname === "/portal/tasks" || workspace === "tasks") return can("task-response");
   if (pathname === "/portal/profile") return can("profile-self");
-  if (workspace === "co-speakers") return can("roster-manage");
+  if (workspace === "co-speakers") return can("profile-self");
   if (workspace === "files") return can("asset-read");
   if (workspace === "resources" || workspace === "wiki") return can("resource-read");
   return true;

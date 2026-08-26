@@ -85,18 +85,47 @@ function upstreamOrigin(): string {
   }
   return parsed.origin;
 }
+function browserRequestOrigin(request: NextRequest): URL {
+  const suppliedOrigin = request.headers.get("origin")?.trim();
+  if (suppliedOrigin && suppliedOrigin !== "null") {
+    try {
+      const parsed = new URL(suppliedOrigin);
+      if (
+        (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+        parsed.origin === suppliedOrigin
+      ) {
+        return parsed;
+      }
+    } catch {
+      // Fall through to the request authority.
+    }
+  }
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",", 1)[0]?.trim();
+  const host = forwardedHost || request.headers.get("host")?.trim() || request.nextUrl.host;
+  const forwardedProtocol = request.headers
+    .get("x-forwarded-proto")
+    ?.split(",", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  const protocol =
+    forwardedProtocol === "https" || forwardedProtocol === "http"
+      ? `${forwardedProtocol}:`
+      : request.nextUrl.protocol;
+  return new URL(`${protocol}//${host}`);
+}
 
 async function proxy(request: NextRequest, context: ApiProxyContext): Promise<Response> {
   const { path } = await context.params;
   const target = new URL(`/api/${path.map(encodeURIComponent).join("/")}`, upstreamOrigin());
   target.search = request.nextUrl.search;
 
+  const browserOrigin = browserRequestOrigin(request);
   const headers = new Headers(request.headers);
   headers.delete("host");
   headers.delete("content-length");
-  headers.set("x-forwarded-host", request.nextUrl.host);
-  headers.set("x-forwarded-proto", request.nextUrl.protocol.slice(0, -1));
-  headers.set("origin", request.nextUrl.origin);
+  headers.set("x-forwarded-host", browserOrigin.host);
+  headers.set("x-forwarded-proto", browserOrigin.protocol.slice(0, -1));
+  headers.set("origin", browserOrigin.origin);
 
   const upstreamController = new AbortController();
   let timedOut = false;

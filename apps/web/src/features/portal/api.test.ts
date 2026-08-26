@@ -6,6 +6,7 @@ const emptyPortal: PortalView = {
   submissions: [],
   profiles: [],
   tasks: [],
+  sessions: [],
   outstandingTaskCount: 0,
 };
 
@@ -20,7 +21,7 @@ function task(): PortalTask {
   return {
     id: "task/one",
     eventId: "event one",
-    submissionId: "submission-1",
+    subject: { type: "session", sessionId: "session-1" },
     participantId: "participant-1",
     type: "form",
     owner: "speaker",
@@ -168,7 +169,7 @@ describe("speaker portal API adapter", () => {
         kind: "slides",
         file,
       }),
-    ).resolves.toEqual({ assetId: "asset-1" });
+    ).resolves.toMatchObject({ id: "asset-1" });
     expect(calls).toHaveLength(2);
     expect(calls[0]?.init).toMatchObject({ credentials: "include", method: "POST" });
     expect(calls[1]).toMatchObject({
@@ -176,12 +177,43 @@ describe("speaker portal API adapter", () => {
       init: { credentials: "omit", method: "PUT", body: file },
     });
   });
+  it("uses canonical session IDs for asset upload bodies and replacement idempotency", async () => {
+    const calls: Array<{ input: RequestInfo | URL; init: RequestInit | undefined }> = [];
+    const api = createPortalApi("https://api.example.com", async (input, init) => {
+      calls.push({ input, init });
+      return calls.length === 1
+        ? uploadAuthorizationResponse("https://uploads.example.com/private/object")
+        : new Response(null, { status: 204 });
+    });
+    const file = new File(["slides"], "session.pdf", { type: "application/pdf" });
+
+    await api.uploadFile?.({
+      eventId: "event-1",
+      participantId: "participant-1",
+      sessionId: "session-1",
+      taskId: "task-1",
+      kind: "slides",
+      file,
+      supersedesAssetId: "asset-previous",
+      expectedLatestVersion: 2,
+    });
+
+    expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
+      participantId: "participant-1",
+      sessionId: "session-1",
+      taskId: "task-1",
+    });
+    expect(JSON.parse(String(calls[0]?.init?.body))).not.toHaveProperty("submissionId");
+    expect(calls[0]?.init?.headers).toMatchObject({
+      "idempotency-key": expect.stringContaining("session-1"),
+    });
+  });
 
   it("re-authorizes and uploads an existing pending asset without sending mutable metadata", async () => {
     const pending: PortalAsset = {
       id: "asset-pending",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "session-1",
       participantId: "participant-1",
       kind: "slides",
       fileName: "slides.pdf",
@@ -239,7 +271,7 @@ describe("speaker portal API adapter", () => {
           kind: "slides",
           file: new File(["slides"], "session.pdf", { type: "application/pdf" }),
         }),
-      ).resolves.toEqual({ assetId: "asset-1" });
+      ).resolves.toMatchObject({ id: "asset-1" });
       expect(calls).toEqual([
         "/api/speaker/events/event-1/uploads",
         "https://portal.example.com/api/uploads/private/object",
@@ -249,12 +281,15 @@ describe("speaker portal API adapter", () => {
     }
   });
 
-  it("allows local HTTP upload grants", async () => {
+  it.each([
+    "http://127.0.0.1:8787/private/object",
+    "http://eventloom-eval.localhost:3015/private/object",
+  ])("allows the local HTTP upload grant %s", async (grantUrl) => {
     const calls: string[] = [];
     const api = createPortalApi("https://api.example.com", async (input) => {
       calls.push(String(input));
       return calls.length === 1
-        ? uploadAuthorizationResponse("http://127.0.0.1:8787/private/object")
+        ? uploadAuthorizationResponse(grantUrl)
         : new Response(null, { status: 204 });
     });
 
@@ -266,8 +301,8 @@ describe("speaker portal API adapter", () => {
         kind: "slides",
         file: new File(["slides"], "session.pdf", { type: "application/pdf" }),
       }),
-    ).resolves.toEqual({ assetId: "asset-1" });
-    expect(calls[1]).toBe("http://127.0.0.1:8787/private/object");
+    ).resolves.toMatchObject({ id: "asset-1" });
+    expect(calls[1]).toBe(grantUrl);
   });
 
   it.each(["javascript:alert('upload')", "ftp://uploads.example.com/private/object"])(
@@ -311,7 +346,7 @@ describe("speaker portal API adapter", () => {
         kind: "slides",
         file: new File(["slides"], "session.pdf", { type: "application/pdf" }),
       }),
-    ).resolves.toEqual({ assetId: "asset-1" });
+    ).resolves.toMatchObject({ id: "asset-1" });
 
     expect(calls.map(({ input }) => String(input))).toEqual([
       "/api/speaker/events/event-1/uploads",

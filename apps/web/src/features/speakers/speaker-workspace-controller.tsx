@@ -51,7 +51,7 @@ import {
   type OrganizerHeadshotUploadStatus,
   organizerHeadshotPreviewPath,
   organizerHeadshotPreviewRequestKey,
-  organizerHeadshotSubmissionId,
+  organizerHeadshotSessionId,
   validateOrganizerHeadshotFile,
 } from "./speaker-headshot-logic";
 import { FormMessage } from "./speaker-invitations";
@@ -723,7 +723,7 @@ type ProfileHeadshotDetailsState = {
   detailNotice: string | null;
   headshotUploadStatus: OrganizerHeadshotUploadStatus;
   headshotUploadMessage: string | null;
-  headshotSubmissionId: string | null;
+  headshotSessionId: string | null;
   headshotPreviewUrl: string | null;
   headshotPreviewError: string | null;
   headshotPreviewLoading: boolean;
@@ -749,7 +749,7 @@ type ProfileHeadshotDetailsAction =
   | { type: "edit-error-set"; message: string | null }
   | { type: "detail-busy-changed"; busy: boolean }
   | { type: "detail-notice-set"; message: string | null }
-  | { type: "headshot-session-selected"; submissionId: string | null }
+  | { type: "headshot-session-selected"; sessionId: string | null }
   | {
       type: "headshot-upload-state-changed";
       status: OrganizerHeadshotUploadStatus;
@@ -800,7 +800,7 @@ const INITIAL_PROFILE_HEADSHOT_DETAILS_STATE: ProfileHeadshotDetailsState = {
   detailNotice: null,
   headshotUploadStatus: "idle",
   headshotUploadMessage: null,
-  headshotSubmissionId: null,
+  headshotSessionId: null,
   headshotPreviewUrl: null,
   headshotPreviewError: null,
   headshotPreviewLoading: false,
@@ -871,7 +871,7 @@ function profileHeadshotDetailsReducer(
     case "headshot-session-selected":
       return {
         ...state,
-        headshotSubmissionId: action.submissionId,
+        headshotSessionId: action.sessionId,
         headshotUploadStatus: "idle",
         headshotUploadMessage: null,
       };
@@ -1138,7 +1138,7 @@ function useSpeakerWorkspaceController({
     detailNotice,
     headshotUploadStatus,
     headshotUploadMessage,
-    headshotSubmissionId,
+    headshotSessionId,
     headshotPreviewUrl,
     headshotPreviewError,
     headshotPreviewLoading,
@@ -1383,9 +1383,9 @@ function useSpeakerWorkspaceController({
     () => (selectedSpeaker === null ? [] : acceptedSpeakerSessions(selectedSpeaker.sessions)),
     [selectedSpeaker],
   );
-  const selectedHeadshotSubmissionId = organizerHeadshotSubmissionId(
+  const selectedHeadshotSessionId = organizerHeadshotSessionId(
     selectedSpeaker?.sessions ?? [],
-    headshotSubmissionId,
+    headshotSessionId,
   );
   const cachedHeadshotAsset =
     selectedSpeaker === null
@@ -1412,7 +1412,7 @@ function useSpeakerWorkspaceController({
     const values = new Map<string, string>();
     for (const speaker of speakers) {
       for (const session of speaker.sessions) {
-        values.set(session.submissionId, session.title);
+        values.set(session.sessionId, session.title);
       }
     }
     return [...values.entries()].sort((left, right) => left[1].localeCompare(right[1]));
@@ -1776,7 +1776,7 @@ function useSpeakerWorkspaceController({
   }
   function beginEdit(speaker: SpeakerRecord): void {
     dispatchRoster({ type: "selected-id-changed", participantId: speaker.participantId });
-    dispatchProfileHeadshotDetails({ type: "headshot-session-selected", submissionId: null });
+    dispatchProfileHeadshotDetails({ type: "headshot-session-selected", sessionId: null });
     dispatchProfileHeadshotDetails({
       type: "headshot-upload-state-changed",
       status: "idle",
@@ -2383,7 +2383,7 @@ function useSpeakerWorkspaceController({
       dispatchProfileHeadshotDetails({ type: "headshot-unavailable", message });
       return;
     }
-    if (selectedHeadshotSubmissionId === null) {
+    if (selectedHeadshotSessionId === null) {
       dispatchProfileHeadshotDetails({
         type: "headshot-session-required",
         message:
@@ -2442,7 +2442,6 @@ function useSpeakerWorkspaceController({
       const replacement = assertSpeakerHeadshotReplacement(
         await api.replaceHeadshot({
           participantId,
-          submissionId: selectedHeadshotSubmissionId,
           file,
           expectedVersion,
           ...(supersedesAssetId === undefined
@@ -2593,16 +2592,16 @@ function useSpeakerWorkspaceController({
               error: headshotPreviewError,
               revision: headshotPreviewRevision,
               eligibleSessions: eligibleHeadshotSessions,
-              selectedSubmissionId: selectedHeadshotSubmissionId,
+              selectedSessionId: selectedHeadshotSessionId,
               uploadStatus: headshotUploadStatus,
               uploadMessage: headshotUploadMessage,
               replacementAvailable: api?.replaceHeadshot !== undefined,
               onRetry: retryHeadshotPreview,
               onImageError: markHeadshotPreviewFailed,
-              onSessionChange: (submissionId) =>
+              onSessionChange: (sessionId) =>
                 dispatchProfileHeadshotDetails({
                   type: "headshot-session-selected",
-                  submissionId,
+                  sessionId,
                 }),
               onUpload: (file) => void uploadOrganizerHeadshot(file),
               mutationStatus: headshotMutationStatus,

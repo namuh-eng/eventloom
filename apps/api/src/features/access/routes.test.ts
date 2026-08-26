@@ -43,7 +43,7 @@ function dependencies(): AccessRouteDependencies {
     listSpeakerContextScopes: async () => [],
     speakerTasks: {
       resolveScope: async () => null,
-      listSubmissions: async () => [],
+      listSessions: async () => [],
       listTasks: async () => [],
     },
     reviewerWorkspace: {

@@ -46,10 +46,13 @@ import {
   type SessionSpeakerCandidate,
   type SessionSpeakerReference,
   type SessionsApi,
+  type SessionTaxonomyOption,
 } from "./api";
 import styles from "./session-workspace.module.css";
 import {
+  loadSessionFormats,
   loadSessionsWorkspaceBundle,
+  loadSessionTracks,
   type SessionsWorkspaceCacheBundle,
   sessionsWorkspaceCacheKey,
   sessionsWorkspaceCacheTags,
@@ -68,6 +71,8 @@ export interface SessionsWorkspaceViewProps {
   readonly selectedSessionId: string | null;
   readonly history: readonly SessionHistoryEntry[];
   readonly speakers?: readonly SessionSpeakerCandidate[] | null;
+  readonly tracks?: readonly SessionTaxonomyOption[] | null;
+  readonly formats?: readonly SessionTaxonomyOption[] | null;
   readonly loading?: boolean;
   readonly loadingHistory?: boolean;
   readonly loadingSpeakers?: boolean;
@@ -75,6 +80,8 @@ export interface SessionsWorkspaceViewProps {
   readonly error?: string | null;
   readonly historyError?: string | null;
   readonly speakerError?: string | null;
+  readonly trackError?: string | null;
+  readonly formatError?: string | null;
   readonly statusMessage?: string | null;
   readonly onSelectSession?: (sessionId: string) => void;
   readonly onSave?: (input: {
@@ -82,7 +89,10 @@ export interface SessionsWorkspaceViewProps {
     readonly expectedVersion: number;
     readonly title: string;
     readonly description: string;
-  }) => Promise<void>;
+    readonly trackIds: readonly string[];
+    readonly formatId?: string | null;
+    readonly durationMinutes: number;
+  }) => Promise<boolean>;
   readonly onSetContentStatus?: (
     session: SessionRecord,
     contentStatus: SessionContentStatus,
@@ -91,6 +101,7 @@ export interface SessionsWorkspaceViewProps {
     readonly sessionId: string;
     readonly expectedVersion: number;
     readonly speakerIds: readonly string[];
+    readonly speakerRoster: readonly SessionSpeakerReference[];
   }) => Promise<void>;
   readonly onRestore?: (input: {
     readonly sessionId: string;
@@ -99,6 +110,8 @@ export interface SessionsWorkspaceViewProps {
   }) => Promise<void>;
   readonly onRetry?: () => void;
   readonly onRetrySpeakers?: () => void;
+  readonly onRetryTracks?: () => void;
+  readonly onRetryFormats?: () => void;
 }
 function sessionsHistoryCacheKey(
   organizationId: string,
@@ -189,13 +202,40 @@ function assignmentReferences(session: SessionRecord): readonly SessionSpeakerRe
 
 interface SessionEditorDraft {
   readonly ownerKey: string;
+  readonly baseVersion: number;
   readonly title?: string;
   readonly description?: string;
+  readonly trackIds?: readonly string[];
+  readonly formatId?: string;
+  readonly durationMinutes?: string;
 }
 
 interface SpeakerAssignmentsDraft {
   readonly ownerKey: string;
   readonly speakerIds: readonly string[];
+}
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+export function sessionContentDraftIsDirty(
+  session: SessionRecord,
+  draft: Readonly<{
+    title: string;
+    description: string;
+    trackIds: readonly string[];
+    formatId: string;
+    durationMinutes: number;
+    baseVersion: number;
+  }>,
+): boolean {
+  return (
+    draft.baseVersion !== session.version ||
+    draft.title !== session.title ||
+    draft.description !== session.description ||
+    !sameIds(draft.trackIds, session.trackIds) ||
+    draft.formatId !== (session.formatId ?? "") ||
+    draft.durationMinutes !== session.durationMinutes
+  );
 }
 
 function SessionEditor({
@@ -204,30 +244,70 @@ function SessionEditor({
   busy,
   onSave,
   onSetContentStatus,
+  tracks,
+  formats,
+  trackError,
+  formatError,
+  onRetryTracks,
+  onRetryFormats,
 }: Readonly<{
   eventId: string;
   session: SessionRecord;
   busy: boolean;
   onSave?: SessionsWorkspaceViewProps["onSave"];
   onSetContentStatus?: SessionsWorkspaceViewProps["onSetContentStatus"];
+  tracks: readonly SessionTaxonomyOption[] | null;
+  formats: readonly SessionTaxonomyOption[] | null;
+  trackError: string | null;
+  formatError: string | null;
+  onRetryTracks?: SessionsWorkspaceViewProps["onRetryTracks"];
+  onRetryFormats?: SessionsWorkspaceViewProps["onRetryFormats"];
 }>) {
   const ownerKey = `${eventId}\u0000${session.id}`;
   const [draft, setDraft] = useState<SessionEditorDraft | null>(null);
   const ownedDraft = draft?.ownerKey === ownerKey ? draft : null;
   const title = ownedDraft?.title ?? session.title;
   const description = ownedDraft?.description ?? session.description;
-  const changed = title !== session.title || description !== session.description;
+  const trackIds = ownedDraft?.trackIds ?? session.trackIds;
+  const formatId = ownedDraft?.formatId ?? session.formatId ?? "";
+  const durationMinutes = ownedDraft?.durationMinutes ?? String(session.durationMinutes);
+  const parsedDurationMinutes = Number(durationMinutes);
+  const rebasing = ownedDraft !== null && ownedDraft.baseVersion !== session.version;
+  const changed =
+    ownedDraft !== null &&
+    sessionContentDraftIsDirty(session, {
+      title,
+      description,
+      trackIds,
+      formatId,
+      durationMinutes: parsedDurationMinutes,
+      baseVersion: ownedDraft.baseVersion,
+    });
   const currentStatus = displayStatus(session.contentStatus);
 
   async function submit(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!onSave || !changed || title.trim().length === 0) return;
-    await onSave({
+    if (
+      !onSave ||
+      !changed ||
+      rebasing ||
+      title.trim().length === 0 ||
+      !Number.isSafeInteger(parsedDurationMinutes) ||
+      parsedDurationMinutes < 1 ||
+      parsedDurationMinutes > 1_440
+    ) {
+      return;
+    }
+    const saved = await onSave({
       sessionId: session.id,
       expectedVersion: session.version,
       title: title.trim(),
       description,
+      trackIds,
+      formatId: formatId.length === 0 ? null : formatId,
+      durationMinutes: parsedDurationMinutes,
     });
+    if (saved) setDraft(null);
   }
 
   return (
@@ -250,7 +330,10 @@ function SessionEditor({
               onChange={(event) => {
                 const value = event.currentTarget.value;
                 setDraft((current) => {
-                  const base = current?.ownerKey === ownerKey ? current : { ownerKey };
+                  const base =
+                    current?.ownerKey === ownerKey
+                      ? current
+                      : { ownerKey, baseVersion: session.version };
                   return { ...base, title: value };
                 });
               }}
@@ -266,13 +349,132 @@ function SessionEditor({
               onChange={(event) => {
                 const value = event.currentTarget.value;
                 setDraft((current) => {
-                  const base = current?.ownerKey === ownerKey ? current : { ownerKey };
+                  const base =
+                    current?.ownerKey === ownerKey
+                      ? current
+                      : { ownerKey, baseVersion: session.version };
                   return { ...base, description: value };
                 });
               }}
             />
           </label>
-          <Button disabled={busy || !changed || title.trim().length === 0 || !onSave} type="submit">
+          <label className={styles.field} htmlFor={`session-format-${session.id}`}>
+            Format
+            <select
+              disabled={busy || onSave === undefined || formats === null || formatError !== null}
+              id={`session-format-${session.id}`}
+              value={formatId}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setDraft((current) => {
+                  const base =
+                    current?.ownerKey === ownerKey
+                      ? current
+                      : { ownerKey, baseVersion: session.version };
+                  return { ...base, formatId: value };
+                });
+              }}
+            >
+              <option value="">No format</option>
+              {(formats ?? []).map((format) => (
+                <option key={format.id} value={format.id}>
+                  {format.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className={styles.field} htmlFor={`session-duration-${session.id}`}>
+            Duration (minutes)
+            <Input
+              disabled={busy || onSave === undefined}
+              id={`session-duration-${session.id}`}
+              min={1}
+              max={1_440}
+              required
+              type="number"
+              value={durationMinutes}
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                setDraft((current) => {
+                  const base =
+                    current?.ownerKey === ownerKey
+                      ? current
+                      : { ownerKey, baseVersion: session.version };
+                  return { ...base, durationMinutes: value };
+                });
+              }}
+            />
+          </label>
+          <fieldset
+            className={styles.field}
+            disabled={busy || onSave === undefined || tracks === null || trackError !== null}
+          >
+            <legend>Tracks</legend>
+            {(tracks ?? []).map((track) => (
+              <label htmlFor={`session-track-${session.id}-${track.id}`} key={track.id}>
+                <Checkbox
+                  id={`session-track-${session.id}-${track.id}`}
+                  checked={trackIds.includes(track.id)}
+                  onCheckedChange={(checked) => {
+                    setDraft((current) => {
+                      const base =
+                        current?.ownerKey === ownerKey
+                          ? current
+                          : { ownerKey, baseVersion: session.version };
+                      const currentTrackIds = base.trackIds ?? session.trackIds;
+                      return {
+                        ...base,
+                        trackIds:
+                          checked === true
+                            ? [...currentTrackIds, track.id]
+                            : currentTrackIds.filter((id) => id !== track.id),
+                      };
+                    });
+                  }}
+                />
+                {track.name}
+              </label>
+            ))}
+          </fieldset>
+          {trackError === null ? null : (
+            <Alert variant="destructive">
+              <AlertTitle>Session tracks unavailable</AlertTitle>
+              <AlertDescription>
+                {trackError} Current track assignments are preserved while tracks are unavailable.
+              </AlertDescription>
+              {!onRetryTracks ? null : (
+                <Button size="sm" type="button" variant="outline" onClick={onRetryTracks}>
+                  Retry tracks
+                </Button>
+              )}
+            </Alert>
+          )}
+          {formatError === null ? null : (
+            <Alert variant="destructive">
+              <AlertTitle>Session formats unavailable</AlertTitle>
+              <AlertDescription>
+                {formatError} The current format is preserved while formats are unavailable.
+              </AlertDescription>
+              {!onRetryFormats ? null : (
+                <Button size="sm" type="button" variant="outline" onClick={onRetryFormats}>
+                  Retry formats
+                </Button>
+              )}
+            </Alert>
+          )}
+          <Button
+            disabled={
+              busy ||
+              !changed ||
+              title.trim().length === 0 ||
+              !Number.isSafeInteger(parsedDurationMinutes) ||
+              parsedDurationMinutes < 1 ||
+              parsedDurationMinutes > 1_440 ||
+              !onSave ||
+              rebasing
+            }
+            type="submit"
+          >
             {busy ? "Saving..." : "Save content"}
           </Button>
         </form>
@@ -287,14 +489,22 @@ function SessionEditor({
           </p>
           <div className={styles.actions}>
             <Button
-              disabled={busy || currentStatus === "Approved" || !onSetContentStatus}
+              disabled={
+                busy || changed || rebasing || currentStatus === "Approved" || !onSetContentStatus
+              }
               type="button"
               onClick={() => void onSetContentStatus?.(session, "Approved")}
             >
               Approve content
             </Button>
             <Button
-              disabled={busy || currentStatus === "Needs changes" || !onSetContentStatus}
+              disabled={
+                busy ||
+                changed ||
+                rebasing ||
+                currentStatus === "Needs changes" ||
+                !onSetContentStatus
+              }
               type="button"
               variant="outline"
               onClick={() => void onSetContentStatus?.(session, "Needs changes")}
@@ -376,6 +586,19 @@ function SpeakerAssignments({
       sessionId: session.id,
       expectedVersion: session.version,
       speakerIds: selectedIds,
+      speakerRoster: selectedIds.map((id) => {
+        const candidate = candidatesById.get(id);
+        const current = currentReferences.find((reference) => reference.id === id);
+        return {
+          id,
+          ...(candidate?.displayName === undefined
+            ? current?.displayName === undefined
+              ? {}
+              : { displayName: current.displayName }
+            : { displayName: candidate.displayName }),
+          ...(current?.role === undefined ? {} : { role: current.role }),
+        };
+      }),
     });
   }
 
@@ -579,6 +802,8 @@ export function SessionsWorkspaceView({
   selectedSessionId,
   history,
   speakers = null,
+  tracks = null,
+  formats = null,
   loading = false,
   loadingHistory = false,
   loadingSpeakers = false,
@@ -586,6 +811,8 @@ export function SessionsWorkspaceView({
   error = null,
   historyError = null,
   speakerError = null,
+  trackError = null,
+  formatError = null,
   statusMessage = null,
   onSelectSession,
   onSave,
@@ -594,6 +821,8 @@ export function SessionsWorkspaceView({
   onRestore,
   onRetry,
   onRetrySpeakers,
+  onRetryTracks,
+  onRetryFormats,
 }: Readonly<SessionsWorkspaceViewProps>) {
   const event = useOrganizerEventWorkspace();
   const eventName = event?.id === eventId ? event.name : undefined;
@@ -712,6 +941,12 @@ export function SessionsWorkspaceView({
                     busy={busy}
                     key={`${eventId}\u0000${selected.id}`}
                     session={selected}
+                    tracks={tracks}
+                    formats={formats}
+                    trackError={trackError}
+                    formatError={formatError}
+                    onRetryTracks={onRetryTracks}
+                    onRetryFormats={onRetryFormats}
                     onSave={onSave}
                     onSetContentStatus={onSetContentStatus}
                   />
@@ -802,6 +1037,18 @@ function ScopedSessionsWorkspace({
   const [speakers, setSpeakers] = useState<readonly SessionSpeakerCandidate[] | null>(
     () => cachedBundle?.speakers ?? null,
   );
+  const [tracks, setTracks] = useState<readonly SessionTaxonomyOption[] | null>(
+    () => cachedBundle?.tracks ?? null,
+  );
+  const [formats, setFormats] = useState<readonly SessionTaxonomyOption[] | null>(
+    () => cachedBundle?.formats ?? null,
+  );
+  const [trackError, setTrackError] = useState<string | null>(
+    () => cachedBundle?.trackError ?? null,
+  );
+  const [formatError, setFormatError] = useState<string | null>(
+    () => cachedBundle?.formatError ?? null,
+  );
   const [loadingSpeakers, setLoadingSpeakers] = useState(cachedBundle === undefined);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -837,6 +1084,10 @@ function ScopedSessionsWorkspace({
             : (next.sessions[0]?.id ?? null),
         );
         setSpeakers(next.speakers);
+        if (next.trackError === null) setTracks(next.tracks);
+        if (next.formatError === null) setFormats(next.formats);
+        setTrackError(next.trackError);
+        setFormatError(next.formatError);
       } catch (loadError) {
         if (isCurrent() && !isAbortError(loadError)) {
           const message = messageFrom(loadError);
@@ -945,8 +1196,8 @@ function ScopedSessionsWorkspace({
     sessionId: string,
     request: () => Promise<SessionRecord>,
     successMessage: string,
-  ): Promise<void> {
-    if (busy) return;
+  ): Promise<boolean> {
+    if (busy) return false;
     loadGeneration.current += 1;
     historyGeneration.current += 1;
     cache?.invalidate(workspaceInvalidationTags);
@@ -958,17 +1209,66 @@ function ScopedSessionsWorkspace({
       const nextSessions = sessions.map((session) => (session.id === sessionId ? next : session));
       setSessions(nextSessions);
       setSelectedSessionId(next.id);
-      if (cache !== null && speakers !== null) {
-        cache.write(workspaceCacheKey, { sessions: nextSessions, speakers }, workspaceCacheTags);
+      if (cache !== null && speakers !== null && tracks !== null && formats !== null) {
+        cache.write(
+          workspaceCacheKey,
+          {
+            sessions: nextSessions,
+            speakers,
+            tracks,
+            formats,
+            trackError,
+            formatError,
+          },
+          workspaceCacheTags,
+        );
       }
       setStatusMessage(successMessage);
       void loadHistory(next, undefined, true);
+      return true;
     } catch (mutationError) {
       setError(messageFrom(mutationError));
+      return false;
     } finally {
       setBusy(false);
     }
   }
+
+  const retryTracks = useCallback(async () => {
+    const next = await loadSessionTracks(api);
+    if (next.error === null) setTracks(next.options);
+    setTrackError(next.error);
+    const current = cache?.peek<SessionsWorkspaceCacheBundle>(workspaceCacheKey);
+    if (current !== undefined) {
+      cache?.write(
+        workspaceCacheKey,
+        {
+          ...current,
+          tracks: next.error === null ? next.options : current.tracks,
+          trackError: next.error,
+        },
+        workspaceCacheTags,
+      );
+    }
+  }, [api, cache, workspaceCacheKey, workspaceCacheTags]);
+
+  const retryFormats = useCallback(async () => {
+    const next = await loadSessionFormats(api);
+    if (next.error === null) setFormats(next.options);
+    setFormatError(next.error);
+    const current = cache?.peek<SessionsWorkspaceCacheBundle>(workspaceCacheKey);
+    if (current !== undefined) {
+      cache?.write(
+        workspaceCacheKey,
+        {
+          ...current,
+          formats: next.error === null ? next.options : current.formats,
+          formatError: next.error,
+        },
+        workspaceCacheTags,
+      );
+    }
+  }, [api, cache, workspaceCacheKey, workspaceCacheTags]);
 
   return (
     <SessionsWorkspaceView
@@ -985,14 +1285,18 @@ function ScopedSessionsWorkspace({
       sessions={sessions}
       speakerError={speakerError}
       speakers={speakers}
+      tracks={tracks}
+      formats={formats}
+      trackError={trackError}
+      formatError={formatError}
       statusMessage={statusMessage}
-      onRestore={(input) =>
-        mutate(
+      onRestore={async (input) => {
+        await mutate(
           input.sessionId,
           () => api.restoreVersion(input),
           "Session content restored from the selected revision.",
-        )
-      }
+        );
+      }}
       onRetry={() => {
         cache?.invalidate(workspaceInvalidationTags);
         void load(undefined, true);
@@ -1001,18 +1305,28 @@ function ScopedSessionsWorkspace({
         cache?.invalidate(workspaceInvalidationTags);
         void load(undefined, true);
       }}
+      onRetryTracks={() => {
+        void retryTracks();
+      }}
+      onRetryFormats={() => {
+        void retryFormats();
+      }}
       onSave={(input) =>
         mutate(input.sessionId, () => api.updateContent(input), "Session content saved.")
       }
-      onSaveSpeakers={(input) =>
-        mutate(input.sessionId, () => api.updateSpeakers(input), "Speaker assignments saved.")
-      }
+      onSaveSpeakers={async (input) => {
+        await mutate(
+          input.sessionId,
+          () => api.updateSpeakers(input),
+          "Speaker assignments saved.",
+        );
+      }}
       onSelectSession={(sessionId) => {
         if (sessionId !== selectedSessionId) historyGeneration.current += 1;
         setSelectedSessionId(sessionId);
       }}
-      onSetContentStatus={(session, contentStatus) =>
-        mutate(
+      onSetContentStatus={async (session, contentStatus) => {
+        await mutate(
           session.id,
           () =>
             api.updateContent({
@@ -1021,8 +1335,8 @@ function ScopedSessionsWorkspace({
               contentStatus,
             }),
           `Session content marked ${contentStatus}.`,
-        )
-      }
+        );
+      }}
     />
   );
 }

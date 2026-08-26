@@ -22,7 +22,7 @@ interface StoredPrivateCapability {
   capabilityHash: string;
   tenantId: string;
   eventId: string;
-  submissionId?: string;
+  subject: PrivateAssetCapabilityBinding["subject"];
   participantId: string;
   taskId?: string;
   objectKey: string;
@@ -52,6 +52,7 @@ interface StoredDownloadCapability {
   expiresAt: string;
   consumedAt: string | null;
   eventId: string;
+  subject: PrivateAssetCapabilityBinding["subject"];
   participantId: string;
   requesterAccountId: string;
   requesterKind: "speaker" | "organizer";
@@ -68,6 +69,8 @@ interface PrivateDownloadCapabilityRow {
   requester_kind: "speaker" | "organizer" | null;
   asset_version: number | null;
   capability_id: string | null;
+  subject_kind: "cfp_submission" | "speaker_session" | "participant" | null;
+  subject_id: string | null;
   object_key: string;
   content_type: string;
   byte_size: number;
@@ -77,8 +80,55 @@ interface PrivateDownloadCapabilityRow {
   consumed_at: string | null;
 }
 
+function subjectId(subject: PrivateAssetCapabilityBinding["subject"]): string | null {
+  switch (subject.kind) {
+    case "cfp_submission":
+      return subject.submissionId;
+    case "speaker_session":
+      return subject.sessionId;
+    case "participant":
+      return null;
+  }
+}
+
+function storedSubject(
+  kind: PrivateDownloadCapabilityRow["subject_kind"],
+  id: string | null,
+): PrivateAssetCapabilityBinding["subject"] | null {
+  if (kind === "cfp_submission" && typeof id === "string") {
+    return { kind, submissionId: id };
+  }
+  if (kind === "speaker_session" && typeof id === "string") {
+    return { kind, sessionId: id };
+  }
+  return kind === "participant" && id === null ? { kind } : null;
+}
+
 function capabilityPayload(capability: StoredPrivateCapability): string {
   return JSON.stringify(capability);
+}
+
+function validSubject(value: unknown): value is PrivateAssetCapabilityBinding["subject"] {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  return (
+    (value.kind === "cfp_submission" && typeof value.submissionId === "string") ||
+    (value.kind === "speaker_session" && typeof value.sessionId === "string") ||
+    value.kind === "participant"
+  );
+}
+
+function sameSubject(
+  left: PrivateAssetCapabilityBinding["subject"],
+  right: PrivateAssetCapabilityBinding["subject"],
+): boolean {
+  return (
+    left.kind === right.kind &&
+    (left.kind === "cfp_submission"
+      ? right.kind === "cfp_submission" && left.submissionId === right.submissionId
+      : left.kind === "speaker_session"
+        ? right.kind === "speaker_session" && left.sessionId === right.sessionId
+        : true)
+  );
 }
 
 function parseStoredCapability(value: string | null): StoredPrivateCapability | null {
@@ -91,7 +141,7 @@ function parseStoredCapability(value: string | null): StoredPrivateCapability | 
       typeof candidate.capabilityHash !== "string" ||
       typeof candidate.tenantId !== "string" ||
       typeof candidate.eventId !== "string" ||
-      (candidate.submissionId !== undefined && typeof candidate.submissionId !== "string") ||
+      !validSubject(candidate.subject) ||
       typeof candidate.participantId !== "string" ||
       typeof candidate.objectKey !== "string" ||
       typeof candidate.contentType !== "string" ||
@@ -166,7 +216,7 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
       capabilityHash: await capabilityHash(token),
       tenantId: binding.tenantId,
       eventId: binding.eventId,
-      ...(binding.submissionId === undefined ? {} : { submissionId: binding.submissionId }),
+      subject: binding.subject,
       participantId: binding.participantId,
       ...(binding.taskId === undefined ? {} : { taskId: binding.taskId }),
       objectKey: binding.objectKey,
@@ -212,6 +262,7 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
       expiresAt: binding.expiresAt,
       consumedAt: null,
       eventId: binding.eventId,
+      subject: binding.subject,
       participantId: binding.participantId,
       requesterAccountId: binding.requesterAccountId,
       requesterKind: binding.requesterKind,
@@ -239,9 +290,9 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
           .prepare(
             `INSERT INTO private_download_capabilities
                (id, asset_id, tenant_id, event_id, participant_id, requester_account_id,
-                requester_kind, asset_version, capability_id, object_key, content_type,
-                byte_size, file_name, token_digest, expires_at, consumed_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+                requester_kind, asset_version, capability_id, subject_kind, subject_id, object_key,
+                content_type, byte_size, file_name, token_digest, expires_at, consumed_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
           )
           .bind(
             capabilityId,
@@ -253,6 +304,8 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
             capability.requesterKind,
             capability.assetVersion,
             capability.capabilityId,
+            capability.subject.kind,
+            subjectId(capability.subject),
             capability.objectKey,
             capability.contentType,
             capability.sizeBytes,
@@ -352,7 +405,7 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
   ): Promise<PrivateDownloadObject> {
     const capability = await this.readDownloadCapability(capabilityId);
     if (capability === null) {
-      return this.consumeLegacyDownloadCapability(capabilityId, token);
+      throw new Error("The download capability is invalid.");
     }
     if (
       capability.eventId.length === 0 ||
@@ -370,42 +423,6 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
       throw new Error("The download capability has already been used.");
     }
     await this.claimDownloadCapability(capability, new Date().toISOString());
-    const object = await this.#bucket.get(capability.objectKey);
-    if (object === null || object.body === null) {
-      throw new Error("The requested private asset is not available.");
-    }
-    const contentType = object.httpMetadata?.contentType ?? "";
-    if (
-      object.size !== capability.sizeBytes ||
-      contentType.trim().toLowerCase() !== capability.contentType.trim().toLowerCase()
-    ) {
-      throw new Error("The private asset no longer matches its immutable metadata.");
-    }
-    return {
-      body: object.body,
-      contentType: capability.contentType,
-      sizeBytes: object.size,
-      fileName: capability.fileName,
-    };
-  }
-
-  private async consumeLegacyDownloadCapability(
-    capabilityId: string,
-    token: string,
-  ): Promise<PrivateDownloadObject> {
-    const row = await this.readRow(capabilityId);
-    const capability = parseStoredCapability(row?.scan_result_code ?? null);
-    if (row === null || capability === null || capability.kind !== "download") {
-      throw new Error("The download capability is invalid.");
-    }
-    await this.assertToken(capability, token);
-    if (Date.parse(capability.expiresAt) <= Date.now()) {
-      throw new Error("The download capability has expired.");
-    }
-    if (row.state !== "uploaded") {
-      throw new Error("The download capability has already been used.");
-    }
-    await this.claim(capabilityId, row.scan_result_code ?? "", "download-consumed", "uploaded");
     const object = await this.#bucket.get(capability.objectKey);
     if (object === null || object.body === null) {
       throw new Error("The requested private asset is not available.");
@@ -446,7 +463,7 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
       capabilityExpired(capability.expiresAt) ||
       capability.tenantId !== binding.tenantId ||
       capability.eventId !== binding.eventId ||
-      capability.submissionId !== binding.submissionId ||
+      !sameSubject(capability.subject, binding.subject) ||
       capability.participantId !== binding.participantId ||
       capability.objectKey !== binding.objectKey ||
       capability.contentType.trim().toLowerCase() !== binding.contentType.trim().toLowerCase() ||
@@ -468,7 +485,7 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
       capabilityExpired(capability.expiresAt) ||
       capability.tenantId !== binding.tenantId ||
       capability.eventId !== binding.eventId ||
-      capability.submissionId !== binding.submissionId ||
+      !sameSubject(capability.subject, binding.subject) ||
       capability.participantId !== binding.participantId ||
       capability.objectKey !== binding.objectKey ||
       (row.state !== "pending" && row.state !== "uploaded")
@@ -531,8 +548,8 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
     const row = await this.#database
       .prepare(
         `SELECT asset_id, tenant_id, event_id, participant_id, requester_account_id,
-                requester_kind, asset_version, capability_id, object_key, content_type,
-                byte_size, file_name, token_digest, expires_at, consumed_at
+                requester_kind, asset_version, capability_id, subject_kind, subject_id, object_key,
+                content_type, byte_size, file_name, token_digest, expires_at, consumed_at
            FROM private_download_capabilities
           WHERE id = ?
           LIMIT 1`,
@@ -540,10 +557,13 @@ export class R2PrivateAssetGateway implements PrivateAssetGateway {
       .bind(capabilityId)
       .first<PrivateDownloadCapabilityRow>();
     if (row === null) return null;
+    const subject = storedSubject(row.subject_kind, row.subject_id);
+    if (subject === null) return null;
     return {
       assetId: row.asset_id,
       tenantId: row.tenant_id,
       eventId: row.event_id ?? "",
+      subject,
       participantId: row.participant_id ?? "",
       requesterAccountId: row.requester_account_id ?? "",
       requesterKind: row.requester_kind ?? "speaker",

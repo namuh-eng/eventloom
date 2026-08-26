@@ -9,7 +9,7 @@ function task(overrides: Partial<PortalTask> = {}): PortalTask {
   return {
     id: "task-1",
     eventId: "event-1",
-    submissionId: "submission-1",
+    subject: { type: "session", sessionId: "session-1" },
     participantId: "participant-1",
     type: "action",
     owner: "speaker",

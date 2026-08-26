@@ -60,7 +60,6 @@ import {
   preferNewerCrmContact,
   refreshCrmAnalyticsAfterContactSave,
   refreshCrmDuplicatesAfterContactSave,
-  refreshCrmEventMembershipAfterSave,
   refreshSelectedContactAfterCollectionReload,
   renderVariablePreview,
 } from "./crm-workspace-model";
@@ -2868,13 +2867,16 @@ function useCrmPipelineActions({
       dispatchDirectory({ type: "replace-contact", contact: next });
       if (selectedContact?.id === next.id)
         dispatchContactSelection({ type: "pipeline-contact-updated", contact: next });
-      const [, nextPipelineHistory] = await Promise.all([
-        loadAnalytics(),
-        selectedContact?.id === next.id ? api.getPipelineHistory(next.id) : Promise.resolve(null),
-        loadContacts(),
-      ]);
-      if (nextPipelineHistory !== null) setPipelineHistory(nextPipelineHistory);
       setStatusMessage(`${displayName(next)} moved to ${stage}.`);
+      void Promise.allSettled([
+        loadAnalytics(),
+        loadContacts(),
+        selectedContact?.id === next.id ? api.getPipelineHistory(next.id) : Promise.resolve(null),
+      ]).then(([, , historyResult]) => {
+        if (historyResult.status === "fulfilled" && historyResult.value !== null) {
+          setPipelineHistory(historyResult.value);
+        }
+      });
     } catch (reason) {
       setError(messageFromError(reason));
     } finally {
@@ -2911,13 +2913,16 @@ function useCrmPipelineActions({
       if (selectedContact?.id === next.id)
         dispatchContactSelection({ type: "pipeline-contact-updated", contact: next });
       const stageChanged = contact.pipelineStage !== next.pipelineStage;
-      const [, nextPipelineHistory] = await Promise.all([
-        stageChanged ? loadAnalytics() : Promise.resolve(),
-        selectedContact?.id === next.id ? api.getPipelineHistory(next.id) : Promise.resolve(null),
-        loadContacts(),
-      ]);
-      if (nextPipelineHistory !== null) setPipelineHistory(nextPipelineHistory);
       setStatusMessage(`${displayName(next)} enrolled in the ${input.stage} pipeline stage.`);
+      void Promise.allSettled([
+        stageChanged ? loadAnalytics() : Promise.resolve(),
+        loadContacts(),
+        selectedContact?.id === next.id ? api.getPipelineHistory(next.id) : Promise.resolve(null),
+      ]).then(([, , historyResult]) => {
+        if (historyResult.status === "fulfilled" && historyResult.value !== null) {
+          setPipelineHistory(historyResult.value);
+        }
+      });
     } catch (reason) {
       setError(messageFromError(reason));
     } finally {
@@ -2938,13 +2943,14 @@ function useCrmPipelineActions({
       markContactMutation();
       dispatchContactSelection({ type: "pipeline-contact-updated", contact: next });
       dispatchDirectory({ type: "replace-contact", contact: next });
-      const [nextPipelineHistory] = await Promise.all([
-        api.getPipelineHistory(next.id),
+      setStatusMessage(`Pipeline stage saved as ${stage}.`);
+      void Promise.allSettled([
         selectedContact.pipelineStage === next.pipelineStage ? Promise.resolve() : loadAnalytics(),
         loadContacts(),
-      ]);
-      setPipelineHistory(nextPipelineHistory);
-      setStatusMessage(`Pipeline stage saved as ${stage}.`);
+        api.getPipelineHistory(next.id),
+      ]).then(([, , historyResult]) => {
+        if (historyResult.status === "fulfilled") setPipelineHistory(historyResult.value);
+      });
     } catch (reason) {
       setError(messageFromError(reason));
     } finally {
@@ -3026,13 +3032,14 @@ function useCrmContactActions({
           ? "Canonical event relationship created."
           : "The canonical event relationship already existed; no duplicate was created.",
       );
-      const nextHistory = await refreshCrmEventMembershipAfterSave(
-        () => api.getContactHistory(selectedContact.id),
-        loadAnalytics,
-        loadContacts,
-        markContactMutation,
-      );
-      setHistory(nextHistory);
+      markContactMutation();
+      void Promise.allSettled([
+        loadAnalytics(),
+        loadContacts(),
+        api.getContactHistory(selectedContact.id),
+      ]).then(([, , historyResult]) => {
+        if (historyResult.status === "fulfilled") setHistory(historyResult.value);
+      });
     } catch (reason) {
       setError(messageFromError(reason));
     } finally {
@@ -3392,14 +3399,17 @@ export function useCrmWorkspaceController(
           ? "Contact changes saved."
           : "Contact added to the organization directory.",
       );
-      const [nextDuplicates] = await Promise.all([
+      void Promise.allSettled([
         refreshCrmDuplicatesAfterContactSave(selection.selectedContact, next, (contactId) =>
           directory.api.findDuplicates(contactId),
         ),
         refreshCrmAnalyticsAfterContactSave(selection.selectedContact, directory.loadAnalytics),
         directory.loadContacts(),
-      ]);
-      if (nextDuplicates !== null) selection.setDuplicates(nextDuplicates);
+      ]).then(([duplicatesResult]) => {
+        if (duplicatesResult.status === "fulfilled" && duplicatesResult.value !== null) {
+          selection.setDuplicates(duplicatesResult.value);
+        }
+      });
     } catch (reason) {
       setError(messageFromError(reason));
     } finally {

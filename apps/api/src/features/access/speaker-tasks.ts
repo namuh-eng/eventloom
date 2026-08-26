@@ -12,18 +12,19 @@ export interface AccountSpeakerScope
   readonly submissionIds: readonly string[];
 }
 
-export interface AccountSpeakerSubmission {
-  readonly organizationId: string;
+export interface AccountSpeakerSession {
+  readonly tenantId: string;
   readonly eventId: string;
-  readonly submissionId: string;
-  readonly participantIds: readonly string[];
+  readonly sessionId: string;
+  readonly status: string;
+  readonly speakerIds: readonly string[];
 }
 
 export interface AccountSpeakerTaskRecord {
   readonly organizationId: string;
   readonly eventId: string;
   readonly taskId: string;
-  readonly submissionId: string | null;
+  readonly sessionId: string | null;
   readonly participantId: string;
   readonly owner: "speaker" | "organizer";
   readonly title: string;
@@ -37,11 +38,11 @@ export interface SpeakerTasksBoundary {
     organizationId: string,
     eventId: string,
   ) => Promise<AccountSpeakerScope | null>;
-  readonly listSubmissions: (
+  readonly listSessions: (
     organizationId: string,
     eventId: string,
-    submissionIds: readonly string[],
-  ) => Promise<readonly AccountSpeakerSubmission[]>;
+    sessionIds: readonly string[],
+  ) => Promise<readonly AccountSpeakerSession[]>;
   readonly listTasks: (
     organizationId: string,
     eventId: string,
@@ -100,8 +101,7 @@ export class AccountSpeakerTasksService {
       throw new SpeakerTasksAccessError("The requested speaker scope is not available.");
     }
     const participantIds = uniqueNonEmpty(scope.participantIds);
-    const submissionIds = uniqueNonEmpty(scope.submissionIds);
-    if (participantIds.length === 0 || submissionIds.length === 0) {
+    if (participantIds.length === 0) {
       throw new SpeakerTasksAccessError("The requested speaker scope is not available.");
     }
     const taskParticipantIds = participantIds.filter((participantId) =>
@@ -110,49 +110,73 @@ export class AccountSpeakerTasksService {
     if (taskParticipantIds.length === 0) {
       return { organizationId: organization, eventId: event, tasks: [] };
     }
-    const [submissions, tasks] = await Promise.all([
-      this.dependencies.speakerTasks.listSubmissions(organization, event, submissionIds),
-      this.dependencies.speakerTasks.listTasks(organization, event, taskParticipantIds),
-    ]);
-    const scopeParticipants = new Set(participantIds);
+    const tasks = await this.dependencies.speakerTasks.listTasks(
+      organization,
+      event,
+      taskParticipantIds,
+    );
     const allowedTaskParticipants = new Set(taskParticipantIds);
-    const allowedSubmissions = new Set(submissionIds);
-    const visibleSubmissions = new Set<string>();
-    for (const submission of submissions) {
+    for (const task of tasks) {
       if (
-        submission.organizationId !== organization ||
-        submission.eventId !== event ||
-        !allowedSubmissions.has(submission.submissionId) ||
-        !submission.participantIds.some((participantId) => scopeParticipants.has(participantId))
+        task.organizationId !== organization ||
+        task.eventId !== event ||
+        !allowedTaskParticipants.has(task.participantId) ||
+        task.owner !== "speaker" ||
+        (task.sessionId !== null && typeof task.sessionId !== "string")
       ) {
         throw new SpeakerTasksAccessError("The speaker repository returned another scope.");
       }
-      visibleSubmissions.add(submission.submissionId);
     }
-    if (visibleSubmissions.size !== allowedSubmissions.size) {
-      throw new SpeakerTasksAccessError("The speaker repository omitted an authorized submission.");
+    const sessionIds = uniqueNonEmpty(
+      tasks.flatMap((task) => (task.sessionId === null ? [] : [task.sessionId])),
+    );
+    const sessions =
+      sessionIds.length === 0
+        ? []
+        : await this.dependencies.speakerTasks.listSessions(organization, event, sessionIds);
+    const acceptedSessions = new Map<string, AccountSpeakerSession>();
+    const returnedSessionIds = new Set<string>();
+    for (const session of sessions) {
+      if (
+        session.tenantId !== organization ||
+        session.eventId !== event ||
+        !sessionIds.includes(session.sessionId) ||
+        returnedSessionIds.has(session.sessionId)
+      ) {
+        throw new SpeakerTasksAccessError("The speaker repository returned another scope.");
+      }
+      returnedSessionIds.add(session.sessionId);
+      if (session.status.toLowerCase() === "accepted") {
+        acceptedSessions.set(session.sessionId, session);
+      }
     }
     return {
       organizationId: organization,
       eventId: event,
       tasks: tasks
-        .map((task) => {
+        .flatMap((task) => {
           if (
             task.organizationId !== organization ||
             task.eventId !== event ||
             !allowedTaskParticipants.has(task.participantId) ||
-            task.owner !== "speaker" ||
-            task.submissionId === null ||
-            !visibleSubmissions.has(task.submissionId)
+            task.owner !== "speaker"
           ) {
             throw new SpeakerTasksAccessError("The speaker repository returned another scope.");
           }
-          return {
-            taskId: task.taskId,
-            title: task.title,
-            dueAt: task.dueAt,
-            status: task.status,
-          };
+          if (
+            task.sessionId !== null &&
+            !acceptedSessions.get(task.sessionId)?.speakerIds.includes(task.participantId)
+          ) {
+            return [];
+          }
+          return [
+            {
+              taskId: task.taskId,
+              title: task.title,
+              dueAt: task.dueAt,
+              status: task.status,
+            },
+          ];
         })
         .sort((left, right) => left.taskId.localeCompare(right.taskId)),
     };

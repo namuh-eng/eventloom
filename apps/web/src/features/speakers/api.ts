@@ -166,9 +166,10 @@ export interface SpeakerDownloadGrant {
 }
 
 export interface SpeakerSession {
-  readonly submissionId: string;
+  readonly sessionId: string;
   readonly title: string;
   readonly status: string;
+  readonly version: number;
 }
 
 export interface SpeakerTask {

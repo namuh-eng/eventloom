@@ -25,7 +25,7 @@ import {
   organizerHeadshotPreviewKey,
   organizerHeadshotPreviewPath,
   organizerHeadshotPreviewRequestKey,
-  organizerHeadshotSubmissionId,
+  organizerHeadshotSessionId,
   validateOrganizerHeadshotFile,
 } from "./speaker-headshot-logic";
 import { SpeakerInvitationControls } from "./speaker-invitations";
@@ -40,6 +40,7 @@ import {
   retainInvitationHistory,
   speakerInvitationReady,
   speakerOnboardingTaskDefinitions,
+  speakerTaskAssigneeLabels,
   taskStatusTone,
   travelLogisticsFor,
   validateSpeakerTaskAssignment,
@@ -62,7 +63,9 @@ const speaker: SpeakerRecord = {
   socialLinks: { twitter: "https://x.com/priya", linkedin: "https://linkedin.com/in/priya" },
   headshotAssetId: null,
   status: "confirmed",
-  sessions: [{ submissionId: "session-1", title: "Incremental builds", status: "accepted" }],
+  sessions: [
+    { sessionId: "session-1", title: "Incremental builds", status: "accepted", version: 1 },
+  ],
   taskSummary: { total: 3, completed: 2, overdue: 0 },
   assets: [],
   version: 3,
@@ -240,20 +243,20 @@ describe("organizer headshot session scope", () => {
   it("automatically uses the sole accepted session and excludes other statuses", () => {
     const sessions = [
       ...speaker.sessions,
-      { submissionId: "session-declined", title: "Declined", status: "declined" },
+      { sessionId: "session-declined", title: "Declined", status: "declined", version: 2 },
     ];
     expect(acceptedSpeakerSessions(sessions)).toEqual([speaker.sessions[0]]);
-    expect(organizerHeadshotSubmissionId(sessions, null)).toBe("session-1");
+    expect(organizerHeadshotSessionId(sessions, null)).toBe("session-1");
   });
 
-  it("requires an explicit eligible submission when multiple accepted sessions exist", () => {
+  it("requires an explicit eligible session when multiple accepted sessions exist", () => {
     const sessions = [
       ...speaker.sessions,
-      { submissionId: "session-2", title: "Second session", status: "Accepted" },
+      { sessionId: "session-2", title: "Second session", status: "Accepted", version: 3 },
     ];
-    expect(organizerHeadshotSubmissionId(sessions, null)).toBeNull();
-    expect(organizerHeadshotSubmissionId(sessions, "session-2")).toBe("session-2");
-    expect(organizerHeadshotSubmissionId(sessions, "session-declined")).toBeNull();
+    expect(organizerHeadshotSessionId(sessions, null)).toBeNull();
+    expect(organizerHeadshotSessionId(sessions, "session-2")).toBe("session-2");
+    expect(organizerHeadshotSessionId(sessions, "session-declined")).toBeNull();
   });
 });
 
@@ -409,7 +412,6 @@ describe("speaker API adapter", () => {
       throw new Error("Expected organizer headshot replacement.");
 
     const replacement = await api.replaceHeadshot({
-      submissionId: "session-1",
       participantId: "participant-1",
       file: new File(["ok"], "speaker.png", { type: "image/png" }),
       expectedVersion: 3,
@@ -418,7 +420,6 @@ describe("speaker API adapter", () => {
     expect(replacement).toEqual({ asset: finalizedAsset, profile });
     expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({
       participantId: "participant-1",
-      submissionId: "session-1",
       kind: "headshot",
     });
     expect(calls.map(({ input }) => String(input))).toEqual([
@@ -462,7 +463,6 @@ describe("speaker API adapter", () => {
 
     await expect(
       api.replaceHeadshot({
-        submissionId: "session-1",
         participantId: "participant-1",
         file: new File(["ok"], "speaker.png", { type: "image/png" }),
         expectedVersion: 3,
@@ -989,15 +989,17 @@ describe("speaker workspace contracts", () => {
       ),
     ).rejects.toThrow("different organization, event, or profile");
   });
-  it("applies exact roster and progress filters without treating zero-task speakers as incomplete", () => {
+  it("falls back to authoritative task summaries when progress rows have no tasks", () => {
     const secondSpeaker: SpeakerRecord = {
       ...speaker,
       participantId: "participant-2",
       displayName: "Marcus Chen",
       email: "marcus@example.test",
       status: "invited",
-      sessions: [{ submissionId: "session-2", title: "Reliable queues", status: "accepted" }],
-      taskSummary: { total: 0, completed: 0, overdue: 0 },
+      sessions: [
+        { sessionId: "session-2", title: "Reliable queues", status: "accepted", version: 1 },
+      ],
+      taskSummary: { total: 3, completed: 0, overdue: 0 },
     };
     const completedTask: SpeakerTask = {
       ...task,
@@ -1027,7 +1029,7 @@ describe("speaker workspace contracts", () => {
         session: "session-2",
         progress: "incomplete",
       }).map((candidate) => candidate.participantId),
-    ).toEqual([]);
+    ).toEqual(["participant-2"]);
     expect(
       filterSpeakerRoster([speaker, secondSpeaker], rows, {
         query: "",
@@ -1164,6 +1166,15 @@ describe("speaker workspace contracts", () => {
       dueAt: "2027-04-09",
       participantIds: ["participant-1", "participant-2"],
     });
+  });
+
+  it("uses speaker names instead of internal IDs for onboarding assignees", () => {
+    expect(
+      speakerTaskAssigneeLabels(
+        ["participant-1", "missing-participant"],
+        [{ participantId: "participant-1", displayName: "Priya Raman" }],
+      ),
+    ).toEqual(["Priya Raman", "Unavailable speaker"]);
   });
 
   it("maps logistics fields and retains terminal invitation results without replacing history", () => {

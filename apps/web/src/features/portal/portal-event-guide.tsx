@@ -8,10 +8,10 @@ import {
   WorkspaceState,
   WorkspaceSurface,
 } from "@/components/workspace";
+import type { ParticipantSafeGuideFailure } from "./portal-provider-model";
 import { PublishedGuideArticle } from "./portal-published-content";
 import styles from "./portal-workspace.module.css";
 import type { PortalResource, PortalWikiPage } from "./types";
-import type { ParticipantSafeGuideFailure } from "./portal-provider-model";
 
 type GuideItem = {
   readonly kind: "Resource" | "Guide";

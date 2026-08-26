@@ -36,7 +36,6 @@ import {
 } from "../../components/ui/alert-dialog";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
-import { FileUpload } from "../../components/ui/file-upload";
 import {
   Card,
   CardContent,
@@ -67,6 +66,7 @@ import {
   EmptyTitle,
 } from "../../components/ui/empty";
 import { Field, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../../components/ui/field";
+import { FileUpload } from "../../components/ui/file-upload";
 import { Input } from "../../components/ui/input";
 import { Progress } from "../../components/ui/progress";
 import {
@@ -126,7 +126,7 @@ import {
   statusLabel,
   taskComplete,
 } from "./speaker-roster-logic";
-import { taskStatusLabel, taskStatusTone } from "./speaker-task-model";
+import { speakerTaskAssigneeLabels, taskStatusLabel, taskStatusTone } from "./speaker-task-model";
 import {
   deadlineAfterEventWarning,
   deadlineTemporalPolicy,
@@ -499,7 +499,7 @@ function SpeakerHeadshotSection({
   error,
   revision,
   eligibleSessions,
-  selectedSubmissionId,
+  selectedSessionId,
   uploadStatus,
   uploadMessage,
   apiAvailable,
@@ -518,14 +518,14 @@ function SpeakerHeadshotSection({
   error: string | null;
   revision: number;
   eligibleSessions: readonly SpeakerSession[];
-  selectedSubmissionId: string | null;
+  selectedSessionId: string | null;
   uploadStatus: string;
   uploadMessage: string | null;
   apiAvailable: boolean;
   replacementAvailable: boolean;
   onRetry: () => void;
   onImageError: () => void;
-  onSessionChange: (submissionId: string) => void;
+  onSessionChange: (sessionId: string) => void;
   onUpload: (file: File) => void;
   mutationStatus: SpeakerMutationStatus;
   mutationMessage: string | null;
@@ -552,13 +552,13 @@ function SpeakerHeadshotSection({
             <FieldLabel htmlFor="speaker-headshot-session">
               Session for headshot replacement
             </FieldLabel>
-            <Select value={selectedSubmissionId ?? ""} onValueChange={onSessionChange}>
+            <Select value={selectedSessionId ?? ""} onValueChange={onSessionChange}>
               <SelectTrigger id="speaker-headshot-session">
                 <SelectValue placeholder="Choose an accepted session" />
               </SelectTrigger>
               <SelectContent>
                 {eligibleSessions.map((session) => (
-                  <SelectItem key={session.submissionId} value={session.submissionId}>
+                  <SelectItem key={session.sessionId} value={session.sessionId}>
                     {session.title}
                   </SelectItem>
                 ))}
@@ -580,7 +580,7 @@ function SpeakerHeadshotSection({
               uploadStatus === "busy" ||
               !apiAvailable ||
               !replacementAvailable ||
-              selectedSubmissionId === null
+              selectedSessionId === null
             }
             title="Drop a headshot here or browse"
             hint="JPEG, PNG, or WebP; maximum 5 MB. Uploads use the event-scoped organizer private upload flow."
@@ -653,13 +653,13 @@ function SpeakerDetailSection({
     error: string | null;
     revision: number;
     eligibleSessions: readonly SpeakerSession[];
-    selectedSubmissionId: string | null;
+    selectedSessionId: string | null;
     uploadStatus: string;
     uploadMessage: string | null;
     replacementAvailable: boolean;
     onRetry: () => void;
     onImageError: () => void;
-    onSessionChange: (submissionId: string) => void;
+    onSessionChange: (sessionId: string) => void;
     onUpload: (file: File) => void;
     mutationStatus: SpeakerMutationStatus;
     mutationMessage: string | null;
@@ -789,7 +789,7 @@ function SpeakerDetailSection({
               ) : (
                 <ul className={styles.list}>
                   {selectedSpeaker.sessions.map((session: SpeakerSession) => (
-                    <li key={session.submissionId} className={styles.preview}>
+                    <li key={session.sessionId} className={styles.preview}>
                       <strong>{session.title}</strong>
                       <Badge variant="outline">{statusLabel(session.status)}</Badge>
                     </li>
@@ -1600,16 +1600,7 @@ function SpeakerTaskAssignmentSection({
                       <TableHead scope="row">{definition.title}</TableHead>
                       <TableCell>{dateLabel(definition.dueAt)}</TableCell>
                       <TableCell>
-                        {definition.participantIds
-                          .map((participantId) => {
-                            const assignee = speakers.find(
-                              (speaker) => speaker.participantId === participantId,
-                            );
-                            return assignee === undefined
-                              ? participantId
-                              : `${assignee.displayName} (${participantId})`;
-                          })
-                          .join(", ")}
+                        {speakerTaskAssigneeLabels(definition.participantIds, speakers).join(", ")}
                       </TableCell>
                     </TableRow>
                   ))}

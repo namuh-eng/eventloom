@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type ApiDependencies, createApp } from "../app";
 import type { RuntimeBindings } from "./cloudflare";
 import { createRuntimeWorker } from "./composition";
-import { createLocalDependencies, LOCAL_ORGANIZATION_ID } from "./local";
+import { createLocalDependencies, LOCAL_ORGANIZATION_ID, LocalSpeakerRepository } from "./local";
 
 vi.setConfig({ testTimeout: 15_000 });
 
@@ -597,13 +597,55 @@ describe("local fixture event graph", () => {
     );
     expect(portal.tasks).toContainEqual(
       expect.objectContaining({
-        submissionId: "speaker-submission:submission_local_1",
+        subject: {
+          type: "session",
+          participantId: "local-participant",
+          sessionId: "session-submission_local_1",
+        },
         participantId: "local-participant",
         status: "not_started",
       }),
     );
   });
 
+  it("grants accepted manual speaker invitations participant-only task scope", async () => {
+    const repository = new LocalSpeakerRepository(() => null);
+    await repository.createTask({
+      task: {
+        id: "manual-participant-task",
+        tenantId: LOCAL_ORGANIZATION_ID,
+        eventId: "demo-event",
+        participantId: "manual-participant",
+        subject: { type: "participant", participantId: "manual-participant" },
+        type: "form",
+        owner: "speaker",
+        title: "Complete profile",
+        status: "not_started",
+        dependencyIds: [],
+        reminderOffsetsMinutes: [],
+        version: 1,
+        updatedAt: "2026-08-09T00:00:00.000Z",
+      },
+      expectedVersion: null,
+      actorAccountId: "local-organizer",
+    });
+    repository.acceptSpeakerInvitation(
+      "manual-speaker-account",
+      "demo-event",
+      "manual-participant",
+    );
+
+    const scope = await repository.getAccessScope("demo-event", "manual-speaker-account");
+    const tasks = await repository.listTasks("demo-event", scope.participantIds);
+
+    expect(scope).toMatchObject({
+      tenantId: LOCAL_ORGANIZATION_ID,
+      submissionIds: [],
+      participantIds: ["manual-participant"],
+      primaryParticipantId: "manual-participant",
+    });
+    expect(tasks.map((task) => task.id)).toEqual(["manual-participant-task"]);
+  });
   it("replays manual speaker creation and validates session speakers against active canonical state", async () => {
     const app = createApp(createLocalDependencies());
     const headers = {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { clearCfpSubmissionState } from "../cfp/draft-persistence";
+import { clearCfpDraftStorage } from "../cfp/draft-persistence";
 import { portalSubmissionIdsMatch, submissionStatusPresentation } from "./model";
 import styles from "./portal.module.css";
 import { usePortal } from "./portal-provider";
@@ -10,13 +10,7 @@ import {
   portalSubmissionActionTargets,
   portalSubmissionDisplayTitle,
 } from "./portal-submission-model";
-import {
-  EmptyState,
-  PageHeading,
-  PortalContentState,
-  SubmissionStatusBadge,
-  TaskStatusBadge,
-} from "./portal-ui";
+import { EmptyState, PageHeading, PortalContentState, SubmissionStatusBadge } from "./portal-ui";
 import { formatPortalDate } from "./portal-ui-model";
 import { SubmissionAnswers, SubmissionParticipants } from "./submission-detail-sections";
 import type { PortalSubmissionStatus } from "./types";
@@ -58,10 +52,6 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
   }
 
   const presentation = submissionStatusPresentation(submission.status);
-  const submissionTasks = view.tasks.filter(
-    (task) =>
-      task.submissionId !== null && portalSubmissionIdsMatch(task.submissionId, submission.id),
-  );
   const displayTitle = portalSubmissionDisplayTitle(submission, view.submissions);
   const currentJourneyIndex = standardJourney.indexOf(submission.status);
   const actionTargets =
@@ -86,12 +76,12 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
           <Link
             className={styles.primaryButton}
             href={actionTargets.editHref}
-            onClick={() =>
-              window.localStorage.setItem(
-                actionTargets.pointerKey,
-                canonicalPortalSubmissionId(submission.id),
-              )
-            }
+            onClick={() => {
+              const submissionId = canonicalPortalSubmissionId(submission.id);
+              window.localStorage.setItem(actionTargets.pointerKey, submissionId);
+              window.sessionStorage.setItem(actionTargets.activePointerKey, submissionId);
+              window.sessionStorage.removeItem(actionTargets.newSubmissionIntentKey);
+            }}
           >
             Edit proposal
           </Link>
@@ -100,7 +90,13 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
             href={actionTargets.newProposalHref}
             onClick={() => {
               if (context === null || cfpEventSlug.length === 0) return;
-              clearCfpSubmissionState(cfpEventSlug, actionTargets.identity, window.localStorage);
+              const submissionId = canonicalPortalSubmissionId(submission.id);
+              if (window.localStorage.getItem(actionTargets.pointerKey) === submissionId) {
+                window.localStorage.removeItem(actionTargets.pointerKey);
+              }
+              clearCfpDraftStorage(cfpEventSlug, window.localStorage);
+              window.sessionStorage.removeItem(actionTargets.activePointerKey);
+              window.sessionStorage.setItem(actionTargets.newSubmissionIntentKey, "1");
             }}
           >
             Submit another proposal
@@ -167,30 +163,13 @@ function SubmissionDetailContent({ submissionId }: Readonly<{ submissionId: stri
           <div className={styles.panelHeading}>
             <div>
               <p className={styles.eyebrow}>Accepted speaker checklist</p>
-              <h2 id="accepted-tasks-heading">Tasks for this session</h2>
+              <h2 id="accepted-tasks-heading">My tasks</h2>
             </div>
-            {can("task-response") ? (
-              <Link href={`/portal/tasks${eventQuery}`}>Open task workspace</Link>
-            ) : null}
           </div>
-          {submissionTasks.length === 0 ? (
-            <EmptyState
-              title="No tasks assigned"
-              description="The event team has not assigned any tasks for this session."
-            />
-          ) : (
-            <ul className={styles.detailTaskList}>
-              {submissionTasks.map((task) => (
-                <li key={task.id}>
-                  <div>
-                    <h3>{task.title}</h3>
-                    <p>{task.description || "Complete this requirement for the event team."}</p>
-                  </div>
-                  <TaskStatusBadge status={task.status} />
-                </li>
-              ))}
-            </ul>
-          )}
+          <p>Tasks are organized by their current participant or program-session assignment.</p>
+          {can("task-response") ? (
+            <Link href={`/portal/tasks${eventQuery}`}>Open My tasks</Link>
+          ) : null}
         </section>
       ) : null}
     </>

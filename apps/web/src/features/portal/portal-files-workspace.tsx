@@ -26,19 +26,26 @@ import {
   resolvePortalAssetFamily,
 } from "./portal-assets";
 import styles from "./portal-workspace.module.css";
-import type { PortalAsset, PortalSubmission } from "./types";
+import type { PortalAsset, PortalTask } from "./types";
 
 export interface FilesWorkspaceUpload {
   readonly participantId: string;
-  readonly submissionId: string;
+  readonly sessionId: string;
   readonly kind: PortalAsset["kind"];
   readonly file: File;
+  readonly taskId?: string;
   readonly supersedesAssetId?: string;
+}
+export interface FilesSessionOption {
+  readonly id: string;
+  readonly eventId: string;
+  readonly title: string;
+  readonly uploadTasks: readonly PortalTask[];
 }
 
 export interface FilesWorkspaceViewProps {
   readonly eventName: string;
-  readonly sessions: readonly PortalSubmission[];
+  readonly sessions: readonly FilesSessionOption[];
   readonly selectedSessionId: string | null;
   readonly assets: readonly PortalAsset[];
   readonly participantId: string | null;
@@ -55,6 +62,7 @@ interface FilesWorkspaceDraft {
   readonly ownerKey: string;
   readonly selectedFamilyId?: string | null;
   readonly uploadFamilyId?: string;
+  readonly taskId?: string | undefined;
   readonly kind?: PortalAsset["kind"];
   readonly file?: File | null;
 }
@@ -82,6 +90,12 @@ const uploadPolicies: Readonly<
     maxBytes: standardUploadMaximumBytes.supporting_file,
   },
 };
+export function compatibleFilesUploadTasks(
+  session: FilesSessionOption | null,
+  kind: PortalAsset["kind"],
+): readonly PortalTask[] {
+  return session?.uploadTasks.filter((task) => task.acceptedAssetKinds?.includes(kind)) ?? [];
+}
 
 export function FilesWorkspaceView({
   eventName,
@@ -117,7 +131,7 @@ export function FilesWorkspaceView({
     ? `portal-file-upload-${selectedSession.id}`
     : "portal-file-upload";
   const scopedAssets = useMemo(
-    () => assets.filter((asset) => asset.submissionId === selectedSession?.id),
+    () => assets.filter((asset) => asset.sessionId === selectedSession?.id),
     [assets, selectedSession?.id],
   );
   const families = useMemo(() => groupPortalAssetVersions(scopedAssets), [scopedAssets]);
@@ -128,16 +142,32 @@ export function FilesWorkspaceView({
   const uploadResolution = uploadFamily
     ? resolvePortalAssetFamily(uploadFamily.versions, uploadFamily.current)
     : null;
+  const replacementHead =
+    uploadResolution?.status === "ready" || uploadResolution?.status === "rejected"
+      ? uploadResolution.latest
+      : undefined;
+  const compatibleTasks = compatibleFilesUploadTasks(selectedSession, uploadKind);
+  const selectedTask = replacementHead
+    ? compatibleTasks.find((task) => task.id === replacementHead.taskId)
+    : (compatibleTasks.find((task) => task.id === ownedDraft?.taskId) ?? compatibleTasks[0]);
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file || !participantId || !selectedSession) return;
-    const supersedesAssetId = uploadResolution?.current?.id;
+    if (
+      !file ||
+      !participantId ||
+      !selectedSession ||
+      (!selectedTask && !(replacementHead && replacementHead.taskId === undefined))
+    ) {
+      return;
+    }
+    const supersedesAssetId = replacementHead?.id;
     if (uploadFamily && !supersedesAssetId) return;
     const saved = await onUpload({
       participantId,
-      submissionId: selectedSession.id,
+      sessionId: selectedSession.id,
       kind: uploadFamily?.kind ?? kind,
       file,
+      ...(selectedTask === undefined ? {} : { taskId: selectedTask.id }),
       ...(supersedesAssetId ? { supersedesAssetId } : {}),
     });
     if (saved) updateDraft({ file: null });
@@ -146,9 +176,9 @@ export function FilesWorkspaceView({
   return (
     <div className={styles.page}>
       <WorkspaceHeader
-        eyebrow="Accepted speaker workspace"
+        eyebrow="Program-session workspace"
         title="Files"
-        description="List, upload, finalize, and download private files with explicit accepted-session attribution."
+        description="List, upload, finalize, and download private files with explicit program-session attribution."
         metadata={
           <>
             <span>{eventName}</span>
@@ -160,8 +190,8 @@ export function FilesWorkspaceView({
       {sessions.length === 0 ? (
         <WorkspaceState
           variant="empty"
-          title="No accepted sessions yet"
-          description="Files unlock after an organizer accepts a proposal."
+          title="No authorized program sessions"
+          description="Files appear when the event team assigns you a session-scoped task."
         />
       ) : (
         <label className={styles.field}>
@@ -209,6 +239,22 @@ export function FilesWorkspaceView({
                 </select>
               </label>
               <label className={styles.field}>
+                <span>Upload task</span>
+                <select
+                  disabled={Boolean(uploadFamily)}
+                  value={selectedTask?.id ?? ""}
+                  onChange={(event) =>
+                    updateDraft({ taskId: event.currentTarget.value, file: null })
+                  }
+                >
+                  {compatibleTasks.map((task) => (
+                    <option key={task.id} value={task.id}>
+                      {task.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className={styles.field}>
                 <span>File type</span>
                 <select
                   disabled={Boolean(uploadFamily)}
@@ -216,6 +262,7 @@ export function FilesWorkspaceView({
                   onChange={(event) => {
                     updateDraft({
                       kind: event.currentTarget.value as PortalAsset["kind"],
+                      taskId: undefined,
                       file: null,
                     });
                   }}
@@ -252,10 +299,10 @@ export function FilesWorkspaceView({
                 onRemove={() => updateDraft({ file: null })}
               />
             </div>
-            {uploadFamily && !uploadResolution?.current ? (
+            {uploadFamily && (!replacementHead || replacementHead.state === "pending_upload") ? (
               <p className={styles.notice}>
-                Authoritative current-version metadata is unavailable. Uploading a replacement is
-                disabled.
+                Authoritative latest-version metadata is unavailable or still processing. Uploading
+                a replacement is disabled.
               </p>
             ) : null}
             <div>
@@ -265,7 +312,10 @@ export function FilesWorkspaceView({
                   !file ||
                   !participantId ||
                   busyAssetIds.size > 0 ||
-                  Boolean(uploadFamily && !uploadResolution?.current)
+                  Boolean(
+                    uploadFamily &&
+                      (!replacementHead || replacementHead.state === "pending_upload"),
+                  )
                 }
               >
                 {uploadFamily ? "Upload new version" : "Upload private file"}
@@ -278,7 +328,7 @@ export function FilesWorkspaceView({
       {selectedSession ? (
         <WorkspaceSurface
           title={`Files for ${selectedSession.title}`}
-          description="Every item below is explicitly attributed to this accepted session."
+          description="Every item below is explicitly attributed to this program session."
         >
           {families.length === 0 ? (
             <WorkspaceState
@@ -371,7 +421,7 @@ function FileFamilyDetail({
         </StatusBadge>
       </div>
       <MetadataList>
-        <MetadataRow label="Session ID" value={display.submissionId ?? "Unavailable"} />
+        <MetadataRow label="Session ID" value={display.sessionId ?? "Unavailable"} />
         <MetadataRow label="Size" value={formatBytes(display.sizeBytes)} />
         <MetadataRow label="Format" value={display.contentType} />
         <MetadataRow label="Review state" value={portalReviewStatus(current)} />

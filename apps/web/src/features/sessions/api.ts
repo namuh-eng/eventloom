@@ -12,6 +12,12 @@ export interface SessionSpeakerCandidate {
   readonly jobTitle?: string;
   readonly company?: string;
 }
+export interface SessionTaxonomyOption {
+  readonly id: string;
+  readonly name: string;
+}
+export type SessionTrackOption = SessionTaxonomyOption;
+export type SessionFormatOption = SessionTaxonomyOption;
 
 export interface SessionRecord {
   readonly id: string;
@@ -21,6 +27,8 @@ export interface SessionRecord {
   readonly status: string;
   readonly contentStatus?: SessionContentStatus;
   readonly durationMinutes: number;
+  readonly trackIds: readonly string[];
+  readonly formatId?: string;
   readonly speakerIds: readonly string[];
   readonly speakerRoster: readonly SessionSpeakerReference[];
   readonly version: number;
@@ -55,12 +63,18 @@ export interface SessionsApi {
     readonly title?: string;
     readonly description?: string;
     readonly contentStatus?: SessionContentStatus;
+    readonly trackIds?: readonly string[];
+    readonly formatId?: string | null;
+    readonly durationMinutes?: number;
   }): Promise<SessionRecord>;
+  listTracks(signal?: AbortSignal): Promise<readonly SessionTrackOption[]>;
+  listFormats(signal?: AbortSignal): Promise<readonly SessionFormatOption[]>;
   listSpeakers(signal?: AbortSignal): Promise<readonly SessionSpeakerCandidate[]>;
   updateSpeakers(input: {
     readonly sessionId: string;
     readonly expectedVersion: number;
     readonly speakerIds: readonly string[];
+    readonly speakerRoster: readonly SessionSpeakerReference[];
   }): Promise<SessionRecord>;
   listHistory(sessionId: string, signal?: AbortSignal): Promise<readonly SessionHistoryEntry[]>;
   restoreVersion(input: {
@@ -148,6 +162,9 @@ function sessionFrom(value: unknown, eventId: string): SessionRecord {
     typeof value.description !== "string" ||
     typeof value.status !== "string" ||
     typeof value.durationMinutes !== "number" ||
+    !Number.isSafeInteger(value.durationMinutes) ||
+    value.durationMinutes < 1 ||
+    value.durationMinutes > 1_440 ||
     typeof value.version !== "number" ||
     !Number.isSafeInteger(value.version) ||
     value.version < 1 ||
@@ -159,6 +176,15 @@ function sessionFrom(value: unknown, eventId: string): SessionRecord {
   }
 
   const contentStatus = contentStatusFrom(value.contentStatus);
+  const trackIds = stringArrayFrom(value.trackIds, "track IDs");
+  const formatId =
+    value.formatId === undefined
+      ? undefined
+      : typeof value.formatId === "string" && value.formatId.trim().length > 0
+        ? value.formatId
+        : (() => {
+            throw new TypeError("The session response contains an invalid format ID.");
+          })();
   const speakerIds = stringArrayFrom(value.speakerIds, "speaker IDs");
   const speakerIdSet = new Set(speakerIds);
   if (!Array.isArray(value.speakerRoster)) {
@@ -179,6 +205,8 @@ function sessionFrom(value: unknown, eventId: string): SessionRecord {
     status: value.status,
     ...(contentStatus === undefined ? {} : { contentStatus }),
     durationMinutes: value.durationMinutes,
+    trackIds,
+    ...(formatId === undefined ? {} : { formatId }),
     speakerIds,
     speakerRoster,
     version: value.version,
@@ -273,6 +301,28 @@ function speakerCandidateFrom(value: unknown): SessionSpeakerCandidate {
       : {}),
   };
 }
+function taxonomyOptionFrom(value: unknown, eventId: string): SessionTaxonomyOption {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    value.id.trim().length === 0 ||
+    value.eventId !== eventId ||
+    typeof value.name !== "string" ||
+    value.name.trim().length === 0
+  ) {
+    throw new TypeError("The session taxonomy response does not match the requested event.");
+  }
+  return { id: value.id, name: value.name };
+}
+
+function taxonomyOptionsFrom(value: unknown, eventId: string): readonly SessionTaxonomyOption[] {
+  if (!Array.isArray(value)) throw new TypeError("The session taxonomy response is invalid.");
+  const options = value.map((item) => taxonomyOptionFrom(item, eventId));
+  if (new Set(options.map((option) => option.id)).size !== options.length) {
+    throw new TypeError("The session taxonomy response contains duplicate resources.");
+  }
+  return options;
+}
 
 async function errorFrom(response: Response): Promise<SessionsApiError> {
   const body = await response.json().catch(() => undefined);
@@ -342,6 +392,9 @@ export function createSessionsApi(
       if (input.title !== undefined) payload.title = input.title;
       if (input.description !== undefined) payload.description = input.description;
       if (input.contentStatus !== undefined) payload.contentStatus = input.contentStatus;
+      if (input.trackIds !== undefined) payload.trackIds = input.trackIds;
+      if (input.formatId !== undefined) payload.formatId = input.formatId;
+      if (input.durationMinutes !== undefined) payload.durationMinutes = input.durationMinutes;
 
       return sessionFrom(
         await request<unknown>(`/${segment(input.sessionId)}`, {
@@ -373,6 +426,27 @@ export function createSessionsApi(
       }
       return speakers;
     },
+    async listTracks(signal) {
+      return taxonomyOptionsFrom(
+        await requestAt<unknown>(
+          eventApiBase,
+          "/sessions/tracks",
+          signal === undefined ? undefined : { signal },
+        ),
+        eventScope,
+      );
+    },
+
+    async listFormats(signal) {
+      return taxonomyOptionsFrom(
+        await requestAt<unknown>(
+          eventApiBase,
+          "/sessions/formats",
+          signal === undefined ? undefined : { signal },
+        ),
+        eventScope,
+      );
+    },
 
     async updateSpeakers(input) {
       return sessionFrom(
@@ -382,6 +456,7 @@ export function createSessionsApi(
           body: JSON.stringify({
             expectedVersion: input.expectedVersion,
             speakerIds: input.speakerIds,
+            speakerRoster: input.speakerRoster,
           }),
         }),
         eventScope,

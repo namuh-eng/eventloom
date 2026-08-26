@@ -117,6 +117,22 @@ export function previewFromPlacementFailure(error: AgendaApiError): AgendaPrevie
     conflicts: failure.report.conflicts,
   };
 }
+export async function recoverPlacementFailure(
+  error: AgendaApiError,
+  recover: (candidatePreview: AgendaPreview | null) => Promise<void>,
+  onCandidateConflicts: (conflicts: AgendaPreview["conflicts"]) => void,
+  onRecoveryError: (error: unknown) => void,
+): Promise<void> {
+  const candidatePreview = previewFromPlacementFailure(error);
+  if (error.status === 409 && candidatePreview !== null) {
+    onCandidateConflicts(candidatePreview.conflicts);
+  }
+  try {
+    await recover(candidatePreview);
+  } catch (recoveryError) {
+    onRecoveryError(recoveryError);
+  }
+}
 
 type AgendaEntryFormProps = EntryFormProps & {
   readonly event: AgendaWorkspaceData["event"];
@@ -419,6 +435,23 @@ function EntryForm({
   );
 }
 
+type PlacementSaveResult =
+  | boolean
+  | undefined
+  | {
+      readonly saved: false;
+      readonly candidateConflicts: AgendaPreview["conflicts"];
+    };
+
+type AgendaBoardWithPlacementResultProps = Omit<AgendaBoardProps, "onSaveEntry"> & {
+  onSaveEntry(entry: AgendaEntryInput): Promise<PlacementSaveResult>;
+};
+export function placementConflictsFromSaveResult(
+  result: PlacementSaveResult,
+): AgendaPreview["conflicts"] {
+  return typeof result === "object" ? result.candidateConflicts : [];
+}
+
 export function AgendaBoard({
   organizationId,
   data,
@@ -443,12 +476,13 @@ export function AgendaBoard({
   onCreateTrack,
   calendarDelivery,
   onRetryCalendarDelivery,
-}: AgendaBoardProps) {
+}: AgendaBoardWithPlacementResultProps) {
   const readiness = publicationReadiness(data, preview);
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
   const [placementDraft, setPlacementDraft] = useState<AgendaTimetablePlacement | undefined>();
   const [placementSessionId, setPlacementSessionId] = useState<string | null>(null);
+  const [placementConflicts, setPlacementConflicts] = useState<AgendaPreview["conflicts"]>([]);
   const [viewMode, setViewMode] = useState(initialView);
   const eventDays = useMemo(
     () =>
@@ -500,6 +534,7 @@ export function AgendaBoard({
     setPlacementSessionId(sessionId);
     setPlacementDraft(placement);
     setShowAddForm(true);
+    setPlacementConflicts([]);
   }
 
   function closeEditor() {
@@ -507,6 +542,7 @@ export function AgendaBoard({
     setPlacementSessionId(null);
     setPlacementDraft(undefined);
     setEditingEntryId(null);
+    setPlacementConflicts([]);
   }
 
   function onScheduleSession() {
@@ -514,6 +550,7 @@ export function AgendaBoard({
     setPlacementSessionId(null);
     setPlacementDraft(undefined);
     setShowAddForm((current) => !current);
+    setPlacementConflicts([]);
   }
 
   function onChooseQueuedSession(sessionId: string) {
@@ -523,6 +560,7 @@ export function AgendaBoard({
   function onEditEntry(entryId: string) {
     setShowAddForm(false);
     setEditingEntryId(entryId);
+    setPlacementConflicts([]);
   }
 
   function onEditCard(entryId: string) {
@@ -676,15 +714,26 @@ export function AgendaBoard({
           placementSessionId={placementSessionId}
           selectedDay={selectedDay}
           data={data}
+          previewConflicts={placementConflicts}
           busy={busy}
           onClose={closeEditor}
           onCancelPlacement={() => {
             setShowAddForm(false);
             setPlacementSessionId(null);
             setPlacementDraft(undefined);
+            setPlacementConflicts([]);
           }}
-          onCancelEdit={() => setEditingEntryId(null)}
-          onSaveEntry={onSaveEntry}
+          onCancelEdit={() => {
+            setEditingEntryId(null);
+            setPlacementConflicts([]);
+          }}
+          onSaveEntry={async (entry) => {
+            setPlacementConflicts([]);
+            const saved = await onSaveEntry(entry);
+            const candidateConflicts = placementConflictsFromSaveResult(saved);
+            if (candidateConflicts.length > 0) setPlacementConflicts(candidateConflicts);
+            return saved === false ? false : typeof saved === "object" ? false : saved;
+          }}
           onRemoveEntry={onRemoveEntry}
           onCreateRoom={onCreateRoom}
           onCreateTrack={onCreateTrack}
@@ -1457,6 +1506,7 @@ interface AgendaEditorDialogProps {
   placementSessionId: string | null;
   selectedDay: string;
   data: AgendaWorkspaceData;
+  previewConflicts: AgendaPreview["conflicts"];
   busy: boolean;
   onClose(): void;
   onCancelPlacement(): void;
@@ -1466,8 +1516,40 @@ interface AgendaEditorDialogProps {
   onCreateRoom: EntryFormProps["onCreateRoom"];
   onCreateTrack: EntryFormProps["onCreateTrack"];
 }
+export function RejectedPlacementConflicts({
+  conflicts,
+}: Readonly<{ conflicts: AgendaPreview["conflicts"] }>) {
+  if (conflicts.length === 0) return null;
+  return (
+    <Alert
+      variant="destructive"
+      className={styles.agendaEditorConflictPanel}
+      role="alert"
+      aria-label="Rejected placement conflicts"
+    >
+      <AlertTitle>
+        Placement was not saved: {conflicts.length} hard conflict
+        {conflicts.length === 1 ? "" : "s"}
+      </AlertTitle>
+      <AlertDescription>
+        <p>
+          The private draft has not changed. Adjust the session, room, or time, or cancel this
+          placement.
+        </p>
+        <ul>
+          {conflicts.map((conflict) => (
+            <li key={conflict.id}>
+              <strong>{conflict.kind.replace("_", " ")}</strong>
+              <span>{conflict.message}</span>
+            </li>
+          ))}
+        </ul>
+      </AlertDescription>
+    </Alert>
+  );
+}
 
-function AgendaEditorDialog({
+export function AgendaEditorDialog({
   open,
   showAddForm,
   editingEntry,
@@ -1475,6 +1557,7 @@ function AgendaEditorDialog({
   placementSessionId,
   selectedDay,
   data,
+  previewConflicts,
   busy,
   onClose,
   onCancelPlacement,
@@ -1510,6 +1593,7 @@ function AgendaEditorDialog({
               : "Adjust this session without leaving the timetable. Changes remain private until the agenda is published."}
           </DialogDescription>
         </DialogHeader>
+        <RejectedPlacementConflicts conflicts={previewConflicts} />
         <div className={styles.agendaEditorBody}>
           {showAddForm ? (
             <EntryForm
@@ -2070,6 +2154,7 @@ function useScopedAgendaWorkspace({
     successMessage: string,
     refreshPreview = false,
     busyKind: AgendaBusyOperation = "save",
+    onPlacementCandidateConflict?: (conflicts: AgendaPreview["conflicts"]) => void,
   ): Promise<boolean> {
     const currentSnapshot = snapshot;
     if (
@@ -2115,18 +2200,29 @@ function useScopedAgendaWorkspace({
               }
             : current,
         );
-        const recoveredData = await currentSnapshot.api.getWorkspace(eventId);
-        const candidatePreview = previewFromPlacementFailure(mutationError);
-        const recoveredPreview =
-          candidatePreview ??
-          (recoveredData.validation?.draftVersion === recoveredData.draft.version
-            ? await currentSnapshot.api.preview(eventId)
-            : null);
-        if (operationIsCurrent(token) && agendaWorkspaceDataMatchesEvent(recoveredData, eventId)) {
-          setSnapshot({ ...currentSnapshot, data: recoveredData });
-          setPreview(recoveredPreview);
-          cache?.write(workspaceCacheKey, recoveredData, workspaceCacheTags);
-        }
+        await recoverPlacementFailure(
+          mutationError,
+          async (candidatePreview) => {
+            const recoveredData = await currentSnapshot.api.getWorkspace(eventId);
+            const recoveredPreview =
+              candidatePreview ??
+              (recoveredData.validation?.draftVersion === recoveredData.draft.version
+                ? await currentSnapshot.api.preview(eventId)
+                : null);
+            if (
+              operationIsCurrent(token) &&
+              agendaWorkspaceDataMatchesEvent(recoveredData, eventId)
+            ) {
+              setSnapshot({ ...currentSnapshot, data: recoveredData });
+              setPreview(recoveredPreview);
+              cache?.write(workspaceCacheKey, recoveredData, workspaceCacheTags);
+            }
+          },
+          (conflicts) => onPlacementCandidateConflict?.(conflicts),
+          (recoveryError) => {
+            if (operationIsCurrent(token)) setError(messageFrom(recoveryError));
+          },
+        );
       }
       return false;
     } finally {
@@ -2423,8 +2519,9 @@ export function ScopedAgendaWorkspace(props: Readonly<ScopedAgendaWorkspaceProps
             onApplySuggestion: applySuggestion,
           })}
       onDismissError={dismissError}
-      onSaveEntry={(entry) =>
-        mutate(
+      onSaveEntry={async (entry) => {
+        let candidateConflicts: AgendaPreview["conflicts"] | undefined;
+        const saved = await mutate(
           (activeApi, current) =>
             activeApi.saveEntry({
               eventId,
@@ -2434,8 +2531,12 @@ export function ScopedAgendaWorkspace(props: Readonly<ScopedAgendaWorkspaceProps
           "Session saved to the private agenda draft.",
           false,
           "save",
-        )
-      }
+          (conflicts) => {
+            candidateConflicts = conflicts;
+          },
+        );
+        return candidateConflicts === undefined ? saved : { saved: false, candidateConflicts };
+      }}
       onRemoveEntry={(entryId) =>
         mutate(
           (activeApi, current) =>

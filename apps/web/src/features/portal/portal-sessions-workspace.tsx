@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useSyncExternalStore } from "react";
 import {
   MetadataList,
   MetadataRow,
@@ -11,52 +10,16 @@ import {
   WorkspaceState,
   WorkspaceSurface,
 } from "@/components/workspace";
-import { PortalRosterPanel } from "./portal-roster-panel";
 import styles from "./portal-workspace.module.css";
-import type {
-  PortalAsset,
-  PortalRosterEnvelope,
-  PortalRosterMember,
-  PortalSubmission,
-  PortalTask,
-} from "./types";
-
-function subscribeToPortalSessionDate(): () => void {
-  return () => undefined;
-}
-
-function browserPortalSessionDate(value: string): string {
-  return new Date(value).toLocaleDateString("en");
-}
-
-function PortalSessionDate({ value }: Readonly<{ value: string }>) {
-  return useSyncExternalStore(
-    subscribeToPortalSessionDate,
-    () => browserPortalSessionDate(value),
-    () => value,
-  );
-}
+import type { PortalAsset, PortalSession, PortalTask } from "./types";
 
 export interface SessionsWorkspaceViewProps {
   readonly eventName: string;
-  readonly sessions: readonly PortalSubmission[];
+  readonly sessions: readonly PortalSession[];
   readonly selectedSessionId: string | null;
-  readonly roster: PortalRosterEnvelope | undefined;
   readonly tasks: readonly PortalTask[];
   readonly assets: readonly PortalAsset[];
-  readonly canManageRoster: boolean;
-  readonly canInvite: boolean;
-  readonly busyRoster: boolean;
   readonly onSelectSession: (sessionId: string) => void;
-  readonly onAddCoSpeaker: (input: {
-    displayName: string;
-    email: string;
-  }) => Promise<boolean> | boolean;
-  readonly onUpdateCoSpeaker: (
-    entry: PortalRosterMember,
-    displayName: string,
-  ) => Promise<boolean> | boolean;
-  readonly onRemoveCoSpeaker: (entry: PortalRosterMember) => Promise<boolean> | boolean;
 }
 
 function taskTone(status: PortalTask["status"]): "neutral" | "info" | "success" | "warning" {
@@ -70,31 +33,30 @@ export function SessionsWorkspaceView({
   eventName,
   sessions,
   selectedSessionId,
-  roster,
   tasks,
   assets,
-  canManageRoster,
-  canInvite,
-  busyRoster,
   onSelectSession,
-  onAddCoSpeaker,
-  onUpdateCoSpeaker,
-  onRemoveCoSpeaker,
 }: SessionsWorkspaceViewProps) {
-  const selected = sessions.find((session) => session.id === selectedSessionId) ?? null;
-  const scopedTasks = selected ? tasks.filter((task) => task.submissionId === selected.id) : [];
-  const scopedAssets = selected ? assets.filter((asset) => asset.submissionId === selected.id) : [];
+  const selected = sessions.find((session) => session.sessionId === selectedSessionId) ?? null;
+  const scopedTasks = selected
+    ? tasks.filter(
+        (task) => task.subject.type === "session" && task.subject.sessionId === selected.sessionId,
+      )
+    : [];
+  const scopedAssets = selected
+    ? assets.filter((asset) => asset.sessionId === selected.sessionId)
+    : [];
 
   return (
     <div className={styles.page}>
       <WorkspaceHeader
-        eyebrow="Accepted speaker workspace"
+        eyebrow="Speaker workspace"
         title="Sessions"
-        description="Choose an accepted proposal before reviewing its identity, authorized speakers, tasks, and files."
+        description="Program sessions are managed independently from CFP proposal outcomes. Choose one to review its identity, tasks, and files."
         metadata={
           <>
             <span>{eventName}</span>
-            <span>{sessions.length} accepted sessions</span>
+            <span>{sessions.length} sessions</span>
           </>
         }
       />
@@ -102,25 +64,25 @@ export function SessionsWorkspaceView({
       {sessions.length === 0 ? (
         <WorkspaceState
           variant="empty"
-          title="No accepted sessions yet"
-          description="Session operations unlock only after an organizer accepts a proposal."
+          title="No sessions yet"
+          description="Sessions appear here after the event team grants your speaker access."
         />
       ) : (
         <WorkspaceListDetail
-          listLabel="Accepted sessions"
+          listLabel="Sessions"
           detailLabel={selected?.title ?? "Session detail"}
           list={
             <ul className={styles.list}>
               {sessions.map((session) => (
-                <li key={session.id}>
+                <li key={session.sessionId}>
                   <button
                     className={styles.listButton}
                     type="button"
-                    aria-current={session.id === selected?.id ? "true" : undefined}
-                    onClick={() => onSelectSession(session.id)}
+                    aria-current={session.sessionId === selected?.sessionId ? "true" : undefined}
+                    onClick={() => onSelectSession(session.sessionId)}
                   >
                     <strong>{session.title}</strong>
-                    <span>Accepted session</span>
+                    <span>{session.status}</span>
                   </button>
                 </li>
               ))}
@@ -129,33 +91,17 @@ export function SessionsWorkspaceView({
           detail={
             selected ? (
               <div className={styles.detail}>
-                <WorkspaceSurface title={selected.title} description="Accepted proposal identity">
+                <WorkspaceSurface title={selected.title} description="Session identity">
                   <div className={styles.surfaceBody}>
-                    <StatusBadge tone="success">Accepted</StatusBadge>
+                    <StatusBadge tone={selected.status === "accepted" ? "success" : "neutral"}>
+                      {selected.status}
+                    </StatusBadge>
                     <MetadataList>
-                      <MetadataRow label="Session ID" value={selected.id} />
-                      <MetadataRow
-                        label="Proposal version"
-                        value={selected.version ?? "Unavailable"}
-                      />
-                      <MetadataRow
-                        label="Last updated"
-                        value={<PortalSessionDate value={selected.updatedAt} />}
-                      />
+                      <MetadataRow label="Session ID" value={selected.sessionId} />
+                      <MetadataRow label="Session version" value={selected.version} />
                     </MetadataList>
                   </div>
                 </WorkspaceSurface>
-
-                <PortalRosterPanel
-                  sessionId={selected.id}
-                  roster={roster}
-                  canManage={canManageRoster}
-                  canInvite={canInvite}
-                  busy={busyRoster}
-                  onAdd={onAddCoSpeaker}
-                  onUpdate={onUpdateCoSpeaker}
-                  onRemove={onRemoveCoSpeaker}
-                />
 
                 <WorkspaceSurface
                   title="Session work"
@@ -184,7 +130,7 @@ export function SessionsWorkspaceView({
 
                 <WorkspaceSurface
                   title="Session files"
-                  description="Only files explicitly attributed to this accepted session are shown."
+                  description="Only files explicitly attributed to this session are shown."
                 >
                   <div className={styles.surfaceBody}>
                     {scopedAssets.length === 0 ? (
@@ -204,7 +150,7 @@ export function SessionsWorkspaceView({
               <WorkspaceState
                 variant="empty"
                 title="Select a session"
-                description="Choose an accepted proposal to open its workspace."
+                description="Choose a session to open its workspace."
               />
             )
           }

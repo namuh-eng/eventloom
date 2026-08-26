@@ -2061,8 +2061,12 @@ export class CrmService {
   ): Promise<CrmEventProjectionResult> {
     const organizationId = identifier(input.organizationId, "organizationId");
     const crmContactId = identifier(input.crmContactId ?? input.contactId, "crmContactId");
-    const participantId = identifier(input.participantId ?? crmContactId, "participantId");
     const eventId = identifier(input.eventId, "eventId");
+    const participantId = identifier(
+      input.participantId ?? `crm-participant:${eventId}:${crmContactId}`,
+      "participantId",
+    );
+    const participantIdWasSupplied = input.participantId !== undefined;
     const key = text(input.idempotencyKey, "idempotencyKey", 512);
     const role = eventRole(input.role);
     const sessionId =
@@ -2081,7 +2085,7 @@ export class CrmService {
       if (prior !== null) {
         if (
           prior.projection.crmContactId !== crmContactId ||
-          prior.projection.participantId !== participantId ||
+          (participantIdWasSupplied && prior.projection.participantId !== participantId) ||
           prior.projection.eventId !== eventId ||
           prior.projection.role !== role ||
           prior.projection.sessionId !== sessionId ||
@@ -2861,8 +2865,24 @@ export class InMemoryCrmRepository implements CrmRepository {
     ) {
       throw new CrmRepositoryConflictError("The projected contact was not found.");
     }
-    const existing = this.#projections.get(key);
-    if (existing !== undefined) return clone(existing);
+    const existingContactProjection = [...this.#projections.values()].find(
+      (candidate) =>
+        candidate.organizationId === normalizedProjection.organizationId &&
+        candidate.eventId === normalizedProjection.eventId &&
+        candidate.crmContactId === normalizedProjection.crmContactId,
+    );
+    if (existingContactProjection !== undefined) return clone(existingContactProjection);
+    const linkedParticipant = [...this.#projections.values()].find(
+      (candidate) =>
+        candidate.organizationId === normalizedProjection.organizationId &&
+        candidate.eventId === normalizedProjection.eventId &&
+        candidate.participantId === normalizedProjection.participantId,
+    );
+    if (linkedParticipant !== undefined) {
+      throw new CrmRepositoryConflictError(
+        "The participant is already linked to another CRM contact.",
+      );
+    }
     this.#projections.set(key, clone(normalizedProjection));
     return clone(normalizedProjection);
   }

@@ -212,43 +212,6 @@ export class D1EventRoleInvitationRepository implements EventRoleInvitationRepos
 
   async reconcileForVerifiedAccount(input: ReconcileEventRoleInvitationsInput): Promise<void> {
     const email = normalizeEmail(input.normalizedEmail);
-    const speakerInvitations = this.database
-      .prepare(
-        `INSERT OR IGNORE INTO event_role_invitations
-          (id, organization_id, event_id, role, recipient_user_id, normalized_email,
-           participant_id, status, creation_idempotency_key, invited_by_actor_type,
-           invited_by_actor_id, invited_at, accepted_by_user_id, accepted_at,
-           declined_by_user_id, declined_at, revoked_by_actor_type, revoked_by_actor_id,
-           revoked_at, version, updated_at)
-         SELECT 'reconciled:speaker:' || profile.organization_id || ':' || profile.event_id || ':' ||
-                  profile.participant_id || ':' || account.id,
-                profile.organization_id, profile.event_id, 'speaker', account.id,
-                lower(trim(account.email)), profile.participant_id, 'pending',
-                'verified-account:speaker:' || profile.participant_id || ':' || account.id,
-                'system', NULL, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, ?
-           FROM auth_users account
-           JOIN speaker_profiles profile
-             ON lower(trim(profile.email)) = lower(trim(account.email))
-            AND profile.status <> 'revoked'
-           JOIN participants participant
-             ON participant.organization_id = profile.organization_id
-            AND participant.event_id = profile.event_id
-            AND participant.id = profile.participant_id
-            AND participant.identity_state = 'resolved'
-            AND participant.normalized_email = lower(trim(account.email))
-          WHERE account.id = ? AND account.email_verified = 1
-            AND lower(trim(account.email)) = ?
-            AND NOT EXISTS (
-              SELECT 1
-                FROM event_role_invitations existing
-               WHERE existing.organization_id = profile.organization_id
-                 AND existing.event_id = profile.event_id
-                 AND existing.role = 'speaker'
-                 AND existing.recipient_user_id = account.id
-                 AND existing.participant_id = profile.participant_id
-            )`,
-      )
-      .bind(input.occurredAt, input.occurredAt, input.recipientUserId, email);
     const reviewerInvitations = this.database
       .prepare(
         `INSERT OR IGNORE INTO event_role_invitations
@@ -333,7 +296,7 @@ export class D1EventRoleInvitationRepository implements EventRoleInvitationRepos
             )`,
       )
       .bind(input.occurredAt, input.recipientUserId, email);
-    await this.database.batch([speakerInvitations, reviewerInvitations]);
+    await this.database.batch([reviewerInvitations]);
   }
 
   async listForVerifiedAccount(

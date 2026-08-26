@@ -56,12 +56,12 @@ export function PortalSubmissionCard({
             className={draft ? styles.primaryTextLink : undefined}
             href={editTarget.href}
             aria-label={`${draft ? "Continue" : "Edit"} proposal ${displayTitle}`}
-            onClick={() =>
-              window.localStorage.setItem(
-                editTarget.pointerKey,
-                canonicalPortalSubmissionId(submission.id),
-              )
-            }
+            onClick={() => {
+              const submissionId = canonicalPortalSubmissionId(submission.id);
+              window.localStorage.setItem(editTarget.pointerKey, submissionId);
+              window.sessionStorage.setItem(editTarget.activePointerKey, submissionId);
+              window.sessionStorage.removeItem(editTarget.newSubmissionIntentKey);
+            }}
           >
             {draft ? "Continue proposal" : "Edit proposal"}
           </Link>

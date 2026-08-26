@@ -4,6 +4,7 @@ import { Badge } from "../../../components/ui/badge";
 import type { OrganizationMember } from "../../members/api";
 import styles from "../review-workspace.module.css";
 import type { ApiSubmittedReview } from "./api-api-submitted-review";
+import { parseScorecardResponses } from "./scorecard-parse-scorecard-responses";
 
 function reviewerLabel(reviewerId: string, reviewerMembers: readonly OrganizationMember[]): string {
   const reviewer = reviewerMembers.find((member) => member.userId === reviewerId);
@@ -46,7 +47,7 @@ export function OrganizerSubmittedReviews({
                 <strong>{reviewerLabel(review.reviewerId, reviewerMembers)}</strong>
                 <span>Review {index + 1}</span>
               </div>
-              <p>{review.comment.trim() || "No comment provided."}</p>
+              <p>{parseScorecardResponses(review.comment).comment || "No comment provided."}</p>
             </li>
           ))}
         </ol>

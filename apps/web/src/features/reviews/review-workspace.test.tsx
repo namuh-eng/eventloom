@@ -39,8 +39,8 @@ import {
   reviseEvaluationPlan,
   validateCreateEvaluationPlanForm,
 } from "./review-workspace";
-import { authoringDateLabel } from "./workspace/model-authoring-date-label";
 import { ReviewNavigation } from "./workspace/evaluator-queue-review-navigation";
+import { authoringDateLabel } from "./workspace/model-authoring-date-label";
 
 const organizerEventWorkspace = vi.hoisted(() => ({
   current: null as {
@@ -1005,7 +1005,7 @@ describe("review workspace", () => {
     expect(markup).toContain("Initial committee review");
     expect(markup).toContain("Aug 10, 2026");
     expect(markup).toContain("Aug 24, 2026");
-    expect(markup).toContain("67%");
+    expect(markup).toContain("83%");
     expect(markup).toContain("2 conflicts declared");
     expect(markup).not.toContain("Calibration and final review");
     expect(markup).not.toContain("Blind review");
@@ -1180,7 +1180,7 @@ describe("review workspace", () => {
     expect(markup).not.toContain("Counted aggregate scores");
     expect(markup).not.toContain("Human decisions");
   });
-  it("normalizes decimal completion percentages consistently across text, width, and ARIA", () => {
+  it("renders aggregate review completion consistently across text, width, and ARIA", () => {
     const plan = testPlan("summit-2026");
     const decimalPlan: ReviewPlanSeed = {
       ...plan,
@@ -1205,9 +1205,9 @@ describe("review workspace", () => {
     );
 
     expect(normalizeCompletionPercent(66.66666666666666)).toBe(67);
-    expect(markup).toContain("<strong>67%</strong>");
-    expect(markup).toContain('aria-valuenow="67"');
-    expect(markup).toContain('style="transform:translateX(-33%)"');
+    expect(markup).toContain("<strong>83%</strong>");
+    expect(markup).toContain('aria-valuenow="83"');
+    expect(markup).toContain('style="transform:translateX(-17%)"');
   });
   it("derives round completion from the authoritative active assignment projection", () => {
     const base = testPlan("summit-2026").assignments[0];
@@ -1579,6 +1579,7 @@ describe("review workspace", () => {
     };
     const aggregates = [
       {
+        planId: plan.id,
         roundId: "round-batch",
         submissionId: "submission-b",
         submittedReviewCount: 2,
@@ -1587,6 +1588,7 @@ describe("review workspace", () => {
         possibleWeightedTotal: 5,
       },
       {
+        planId: plan.id,
         roundId: "round-batch",
         submissionId: "submission-a",
         submittedReviewCount: 1,
@@ -1595,6 +1597,7 @@ describe("review workspace", () => {
         possibleWeightedTotal: 5,
       },
       {
+        planId: plan.id,
         roundId: "round-batch",
         submissionId: "submission-c",
         submittedReviewCount: 0,
@@ -1647,6 +1650,18 @@ describe("review workspace", () => {
             plan,
             submissions,
             assignments,
+            resultScopes: [
+              {
+                planId: plan.id,
+                planVersion: plan.version,
+                planName: plan.name,
+                roundId: "round-batch",
+                roundName: "Batch round",
+                sequence: 1,
+                historical: false,
+              },
+            ],
+            submittedReviews: [],
             progress,
             aggregates,
             decisions,
@@ -2421,6 +2436,288 @@ describe("review workspace", () => {
       fetchMock.mockRestore();
       vi.doUnmock("react");
       vi.doUnmock("./workspace/organizer-reviewer-pool-controller");
+      vi.resetModules();
+    }
+  });
+  it("keeps assignment previews behind the reviewer-pool refresh barrier", async () => {
+    vi.doUnmock("react");
+    vi.resetModules();
+    const stateSlots: Array<{ value: unknown } | undefined> = [];
+    const refSlots: Array<{ current: unknown } | undefined> = [];
+    let stateCursor = 0;
+    let refCursor = 0;
+    let assignmentPreview: unknown = null;
+    let assignmentPreviewKey: string | null = null;
+    let busy = false;
+    let message: string | null = null;
+    let previewRequest = 0;
+    let applyRequest = 0;
+    let resolveLatePreview: ((response: Response) => void) | undefined;
+    const preview = (fingerprint: string) => ({
+      scope: {
+        tenantId: "tenant-1",
+        eventId: "event-1",
+        planId: "plan-1",
+        roundId: "round-1",
+        planVersion: 3,
+      },
+      desiredAssignments: [],
+      deficits: [],
+      exclusions: [],
+      expectedActiveVersions: [],
+      submissionRevisions: [{ submissionId: "submission-1", revision: 1 }],
+      fingerprint,
+    });
+    let useOrganizerAssignmentActions: typeof import("./workspace/organizer-authoring-assignment-actions").useOrganizerAssignmentActions;
+    function renderMockedHook<TOptions, TResult>(
+      hook: (options: TOptions) => TResult,
+      options: TOptions,
+    ): TResult {
+      stateCursor = 0;
+      refCursor = 0;
+      return hook(options);
+    }
+    function renderAssignmentActionsHarness() {
+      return renderMockedHook(useOrganizerAssignmentActions, {
+        seed: { planId: "plan-1" },
+        baseUrl: "",
+        reviewerMembersError: null,
+        onAssignmentsPersisted: async () => undefined,
+        rounds: [{ id: "round-1" }],
+        assignmentRoundId: "round-1",
+        assignmentPreview,
+        setAssignmentPreview: (next: unknown) => {
+          assignmentPreview = next;
+        },
+        assignmentPreviewKey,
+        setAssignmentPreviewKey: (next: string | null) => {
+          assignmentPreviewKey = next;
+        },
+        setMessage: (next: string | null) => {
+          message = next;
+        },
+        assignmentSubmissionId: "submission-1",
+        assignmentReviewerIds: ["reviewer-1"],
+        assignmentReviewerSelectionMode: "explicit",
+        version: 3,
+        status: "open",
+        setBusy: (next: boolean) => {
+          busy = next;
+        },
+        reviewerIdSet: new Set(["reviewer-1"]),
+        reviewerDirectoryReady: true,
+      } as never);
+    }
+
+    try {
+      vi.doMock("react", async () => {
+        const actualReact = await vi.importActual<typeof import("react")>("react");
+        return {
+          ...actualReact,
+          useCallback: <T,>(callback: T) => callback,
+          useEffect: () => undefined,
+          useMemo: <T,>(factory: () => T) => factory(),
+          useRef: <T,>(initial: T) => {
+            const index = refCursor++;
+            let slot = refSlots[index];
+            if (slot === undefined) {
+              slot = { current: initial };
+              refSlots[index] = slot;
+            }
+            return slot as { current: T };
+          },
+          useState: <T,>(initial: T) => {
+            const index = stateCursor++;
+            let slot = stateSlots[index];
+            if (slot === undefined) {
+              slot = { value: initial };
+              stateSlots[index] = slot;
+            }
+            return [
+              slot.value as T,
+              (next: T | ((current: T) => T)) => {
+                slot.value =
+                  typeof next === "function" ? (next as (current: T) => T)(slot.value as T) : next;
+              },
+            ] as const;
+          },
+        };
+      });
+      ({ useOrganizerAssignmentActions } = await import(
+        "./workspace/organizer-authoring-assignment-actions"
+      ));
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/preview")) {
+          previewRequest += 1;
+          if (previewRequest === 2) {
+            return new Promise<Response>((resolve) => {
+              resolveLatePreview = resolve;
+            });
+          }
+          return new Response(JSON.stringify({ data: preview(`fresh-${previewRequest}`) }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.endsWith("/apply")) {
+          applyRequest += 1;
+          if (applyRequest === 1) {
+            return new Response(JSON.stringify({ error: { message: "Preview is stale." } }), {
+              status: 409,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              data: {
+                scope: preview("unused").scope,
+                activeAssignments: [],
+                supersededAssignments: [],
+                history: [],
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+      let actions = renderAssignmentActionsHarness();
+      await actions.previewAssignments();
+      actions = renderAssignmentActionsHarness();
+      expect(assignmentPreview).not.toBeNull();
+
+      const latePreview = actions.previewAssignments();
+      if (resolveLatePreview === undefined) throw new Error("Expected a pending preview request.");
+      expect(actions.blockAssignmentsForReviewerPoolSave()).toBe(false);
+      actions = renderAssignmentActionsHarness();
+      expect(assignmentPreview).not.toBeNull();
+      expect(actions.reviewerPoolSavePending).toBe(false);
+      expect(busy).toBe(true);
+
+      await actions.assignReviewers();
+      expect(applyRequest).toBe(0);
+      resolveLatePreview(
+        new Response(JSON.stringify({ error: { message: "Late preview failed." } }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await actions.previewAssignments();
+      actions = renderAssignmentActionsHarness();
+      expect(message).toBe("Authoritative reviewer distribution preview loaded.");
+      expect(busy).toBe(false);
+      await latePreview;
+      expect(message).toBe("Authoritative reviewer distribution preview loaded.");
+      expect(busy).toBe(false);
+      expect(assignmentPreview).not.toBeNull();
+
+      expect(actions.blockAssignmentsForReviewerPoolSave()).toBe(true);
+      actions = renderAssignmentActionsHarness();
+      expect(actions.reviewerPoolSavePending).toBe(true);
+      expect(busy).toBe(true);
+      actions.unblockAssignmentsAfterReviewerPoolSave();
+      actions = renderAssignmentActionsHarness();
+      expect(actions.reviewerPoolSavePending).toBe(false);
+      expect(busy).toBe(false);
+
+      await actions.previewAssignments();
+      actions = renderAssignmentActionsHarness();
+      await actions.assignReviewers();
+      expect(message).toBe("Preview is stale.");
+      expect(assignmentPreview).not.toBeNull();
+
+      await actions.previewAssignments();
+      actions = renderAssignmentActionsHarness();
+      await actions.assignReviewers();
+      expect(applyRequest).toBe(2);
+      expect(assignmentPreview).toBeNull();
+      stateSlots.length = 0;
+      refSlots.length = 0;
+      vi.doMock("../members/api", () => ({
+        MemberApiError: Error,
+        createMemberApi: () => ({
+          getReviewerPool: async () => null,
+          setReviewerPool: async () => ({
+            organizationId: "org-1",
+            eventId: "event-1",
+            roundId: "round-1",
+            version: 1,
+            grants: [],
+          }),
+        }),
+      }));
+      const { useOrganizerReviewerPool } = await import(
+        "./workspace/organizer-reviewer-pool-controller"
+      );
+      let reviewerPoolBarrier = false;
+      function renderReviewerPool(
+        onSaveStart: () => boolean | undefined,
+        onSaveFinished: () => void,
+      ) {
+        return renderMockedHook(useOrganizerReviewerPool, {
+          baseUrl: "",
+          organizationId: "org-1",
+          eventId: "event-1",
+          roundId: "round-1",
+          reviewers: [],
+          defaultMaxAssignments: 1,
+          onSaveStart,
+          onSaveFinished,
+        });
+      }
+      let reviewerPool = renderReviewerPool(
+        () => {
+          reviewerPoolBarrier = true;
+          throw new Error("Start callback failed.");
+        },
+        () => {
+          reviewerPoolBarrier = false;
+        },
+      );
+      await reviewerPool.save();
+      reviewerPool = renderReviewerPool(
+        () => {
+          reviewerPoolBarrier = true;
+          throw new Error("Start callback failed.");
+        },
+        () => {
+          reviewerPoolBarrier = false;
+        },
+      );
+      expect(reviewerPoolBarrier).toBe(false);
+      expect(reviewerPool.saving).toBe(false);
+      expect(reviewerPool.error).toBe("Start callback failed.");
+
+      reviewerPool = renderReviewerPool(
+        () => {
+          reviewerPoolBarrier = true;
+          return true;
+        },
+        () => {
+          reviewerPoolBarrier = false;
+          throw new Error("Finish callback failed.");
+        },
+      );
+      await reviewerPool.save();
+      reviewerPool = renderReviewerPool(
+        () => {
+          reviewerPoolBarrier = true;
+          return true;
+        },
+        () => {
+          reviewerPoolBarrier = false;
+          throw new Error("Finish callback failed.");
+        },
+      );
+      expect(reviewerPoolBarrier).toBe(false);
+      expect(reviewerPool.saving).toBe(false);
+      expect(reviewerPool.error).toBe("Finish callback failed.");
+    } finally {
+      vi.restoreAllMocks();
+      vi.doUnmock("react");
+      vi.doUnmock("../members/api");
       vi.resetModules();
     }
   });

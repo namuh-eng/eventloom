@@ -52,8 +52,14 @@ class FakeSpeakerRepository implements SpeakerRepository {
 
   getAccessScope(eventId: string, accountId: string): Promise<SpeakerAccessScope> {
     return Promise.resolve(
-      this.scopes.get(`${eventId}:${accountId}`) ?? { submissionIds: [], participantIds: [] },
+      this.scopes.get(`${eventId}:${accountId}`) ?? {
+        submissionIds: [],
+        participantIds: [],
+      },
     );
+  }
+  listPortalCanonicalSessions() {
+    return Promise.resolve([]);
   }
 
   listSubmissions(eventId: string, submissionIds: readonly string[]): Promise<SpeakerSubmission[]> {
@@ -375,6 +381,7 @@ class CountingOrganizerReadModelRepository extends OrganizerSpeakerRepository {
       tasks: resources.tasks === true ? this.tasks.filter((task) => task.eventId === eventId) : [],
       assets:
         resources.assets === true ? this.assets.filter((asset) => asset.eventId === eventId) : [],
+      canonicalSessions: [],
     });
   }
 
@@ -535,6 +542,9 @@ class CountingPortalRepository extends OrganizerSpeakerRepository {
     this.contextReads += 1;
     return Promise.resolve(accountId === "account-1" ? this.portalContexts : []);
   }
+  listPortalCanonicalSessions() {
+    return Promise.resolve([]);
+  }
 
   listAssets(eventId: string, participantIds: readonly string[]): Promise<SpeakerAsset[]> {
     this.assetReads += 1;
@@ -627,7 +637,11 @@ class DelayedPortalWorkspaceRepository extends CountingPortalRepository {
 
 class FakePrivateAssetGateway implements PrivateAssetGateway {
   readonly uploads: CreatePrivateUploadGrantCommand[] = [];
-  readonly downloads: { objectKey: string; fileName: string; expiresAt: string }[] = [];
+  readonly downloads: {
+    objectKey: string;
+    fileName: string;
+    expiresAt: string;
+  }[] = [];
 
   createUploadGrant(command: CreatePrivateUploadGrantCommand): Promise<PrivateUploadGrant> {
     this.uploads.push(command);
@@ -699,18 +713,21 @@ function profile(participantId: string, eventId = "event-1"): SpeakerProfile {
 }
 
 function task(
-  input: Partial<SpeakerTask> & Pick<SpeakerTask, "id" | "participantId">,
+  input: (Partial<SpeakerTask> & Pick<SpeakerTask, "id" | "participantId">) & {
+    sessionId?: string | null;
+  },
 ): SpeakerTask {
   const participantId = input.participantId;
-  const submissionId = input.submissionId === undefined ? "submission-1" : input.submissionId;
+  const sessionId = input.sessionId ?? null;
+  const subject =
+    input.subject ??
+    (sessionId === null
+      ? ({ type: "participant", participantId } as const)
+      : ({ type: "session", participantId, sessionId } as const));
   return {
+    tenantId: "org-1",
     eventId: "event-1",
-    submissionId,
-    subject:
-      input.subject ??
-      (submissionId === null
-        ? { type: "participant", participantId }
-        : { type: "session", participantId, submissionId }),
+    subject,
     type: "upload",
     owner: "speaker",
     title: `Task ${input.id}`,
@@ -723,10 +740,41 @@ function task(
   };
 }
 
+function createTestSessionAuthority(
+  overrides: Partial<{
+    tenantId: string;
+    eventId: string;
+    status: string;
+    speakerIds: readonly string[];
+  }> = {},
+) {
+  return {
+    getSession: async (organizationId: string, eventId: string, sessionId: string) =>
+      ({
+        id: sessionId,
+        tenantId: overrides.tenantId ?? organizationId,
+        eventId: overrides.eventId ?? eventId,
+        status: overrides.status ?? (sessionId.includes("declined") ? "declined" : "accepted"),
+        title: "Descriptive accepted session",
+        speakerIds:
+          overrides.speakerIds ??
+          (sessionId.includes("primary")
+            ? ["participant-primary", "participant-co"]
+            : sessionId.includes("submission-co")
+              ? ["participant-co"]
+              : sessionId.includes("submission-2")
+                ? ["participant-2"]
+                : ["participant-1", "participant-2", "participant-other-event"]),
+      }) as never,
+  };
+}
+const testSessionAuthority = createTestSessionAuthority();
+
 function createFixture() {
   const repository = new FakeSpeakerRepository();
   const gateway = new FakePrivateAssetGateway();
   repository.scopes.set("event-1:account-1", {
+    tenantId: "org-1",
     submissionIds: ["submission-1", "submission-declined"],
     participantIds: ["participant-1"],
     capabilities: [
@@ -739,6 +787,7 @@ function createFixture() {
     ],
   });
   repository.scopes.set("event-1:account-2", {
+    tenantId: "org-1",
     submissionIds: ["submission-2"],
     participantIds: ["participant-2"],
     capabilities: [],
@@ -760,7 +809,11 @@ function createFixture() {
     profile("participant-other-event", "event-2"),
   );
   repository.tasks.push(
-    task({ id: "dependency", participantId: "participant-1", status: "completed" }),
+    task({
+      id: "dependency",
+      participantId: "participant-1",
+      status: "completed",
+    }),
     task({
       id: "slides-task",
       participantId: "participant-1",
@@ -777,20 +830,34 @@ function createFixture() {
     task({
       id: "declined-task",
       participantId: "participant-1",
-      submissionId: "submission-declined",
+      subject: {
+        type: "session",
+        participantId: "participant-1",
+        sessionId: "speaker-submission:submission-declined",
+      },
     }),
     task({
       id: "other-speaker-task",
       participantId: "participant-2",
-      submissionId: "submission-2",
+      subject: {
+        type: "session",
+        participantId: "participant-2",
+        sessionId: "speaker-submission:submission-2",
+      },
     }),
     task({
       id: "other-event-task",
       participantId: "participant-other-event",
-      submissionId: "submission-other-event",
+      subject: {
+        type: "session",
+        participantId: "participant-other-event",
+        sessionId: "speaker-submission:submission-other-event",
+      },
       eventId: "event-2",
     }),
   );
+
+  const acceptedTestSessionAuthority = testSessionAuthority;
 
   let sequence = 0;
   const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
@@ -798,6 +865,7 @@ function createFixture() {
     now: () => new Date(now),
     generateId: () => `generated-${++sequence}`,
     communications: testSpeakerCommunications().communications,
+    sessionAuthority: acceptedTestSessionAuthority,
   });
   return { repository, gateway, service };
 }
@@ -872,6 +940,7 @@ function createOrganizerFixture(
     now: () => new Date(now),
     generateId: () => `generated-${++sequence}`,
     communications: testSpeakerCommunications().communications,
+    sessionAuthority: testSessionAuthority,
   });
   return { repository, gateway, service };
 }
@@ -885,10 +954,16 @@ function createConcurrentOrganizerFixture() {
     participantIds: ["participant-1"],
   });
   repository.submissions.push(
-    { ...submission("submission-1", "participant-1"), title: "Canonical session" },
+    {
+      ...submission("submission-1", "participant-1"),
+      title: "Canonical session",
+    },
     submission("submission-declined", "participant-1", "declined"),
   );
-  repository.profiles.push({ ...profile("participant-1"), displayName: "Profile name" });
+  repository.profiles.push({
+    ...profile("participant-1"),
+    displayName: "Profile name",
+  });
   repository.roster.push({
     id: "roster:event-1:speaker-submission:submission-1:participant-1",
     eventId: "event-1",
@@ -905,7 +980,7 @@ function createConcurrentOrganizerFixture() {
     id: "asset-concurrent",
     tenantId: "org-1",
     eventId: "event-1",
-    submissionId: "speaker-submission:submission-1",
+    sessionId: "speaker-submission:submission-1",
     participantId: "participant-1",
     kind: "slides",
     objectKey: "events/event-1/participants/participant-1/slides/asset-concurrent",
@@ -921,6 +996,7 @@ function createConcurrentOrganizerFixture() {
     {
       speakerSender,
       now: () => new Date(now),
+      sessionAuthority: testSessionAuthority,
     },
   );
   return { repository, service };
@@ -939,7 +1015,7 @@ function createDualRoleFixture() {
     task({
       id: "dual-role-task-2",
       participantId: "participant-2",
-      submissionId: "submission-2",
+      sessionId: "speaker-submission:submission-2",
     }),
   );
   repository.assets.push(
@@ -947,8 +1023,9 @@ function createDualRoleFixture() {
       id: "dual-role-asset-1",
       tenantId: "org-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
+      versionFamilyId: "dual-role-family",
       kind: "slides",
       objectKey: "events/event-1/participants/participant-1/slides/dual-role-asset-1",
       fileName: "participant-1.pdf",
@@ -961,7 +1038,7 @@ function createDualRoleFixture() {
       id: "dual-role-asset-2",
       tenantId: "org-1",
       eventId: "event-1",
-      submissionId: "submission-2",
+      sessionId: "speaker-submission:submission-2",
       participantId: "participant-2",
       kind: "slides",
       objectKey: "events/event-1/participants/participant-2/slides/dual-role-asset-2",
@@ -1031,22 +1108,30 @@ describe("SpeakerService organizer aggregate reads", () => {
       updatedAt: now,
     });
     repository.tasks.push(
-      task({ id: "accepted-task", participantId: "participant-1" }),
-      task({ id: "action-task", participantId: "participant-1", type: "action" }),
+      task({
+        id: "accepted-task",
+        participantId: "participant-1",
+        sessionId: "speaker-submission:submission-1",
+      }),
+      task({
+        id: "action-task",
+        participantId: "participant-1",
+        type: "action",
+      }),
       task({
         id: "manual-task",
         participantId: "participant-manual",
-        submissionId: null,
+        sessionId: null,
       }),
       task({
         id: "declined-task",
         participantId: "participant-1",
-        submissionId: "submission-declined",
+        sessionId: "speaker-submission:submission-declined",
       }),
       task({
         id: "other-participant-task",
         participantId: "participant-2",
-        submissionId: "submission-other-event",
+        sessionId: "speaker-submission:submission-other-event",
       }),
     );
     repository.assets.push(
@@ -1054,7 +1139,7 @@ describe("SpeakerService organizer aggregate reads", () => {
         id: "accepted-asset",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "accepted-task",
         kind: "slides",
@@ -1083,7 +1168,7 @@ describe("SpeakerService organizer aggregate reads", () => {
         id: "declined-asset",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-declined",
+        sessionId: "speaker-submission:submission-declined",
         participantId: "participant-1",
         taskId: "declined-task",
         kind: "slides",
@@ -1098,7 +1183,7 @@ describe("SpeakerService organizer aggregate reads", () => {
         id: "other-tenant-asset",
         tenantId: "org-2",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "accepted-task",
         kind: "slides",
@@ -1116,6 +1201,7 @@ describe("SpeakerService organizer aggregate reads", () => {
       {
         speakerSender,
         now: () => new Date(now),
+        sessionAuthority: testSessionAuthority,
       },
     );
 
@@ -1141,8 +1227,15 @@ describe("SpeakerService organizer aggregate reads", () => {
       expect.objectContaining({ participantId: "participant-manual" }),
     ]);
     await expect(service.listOrganizerAssets("event-1", "account-1")).resolves.toEqual([
-      expect.objectContaining({ id: "accepted-asset" }),
-      expect.objectContaining({ id: "manual-asset", participantName: "Manual Speaker" }),
+      expect.objectContaining({
+        id: "accepted-asset",
+        sessionId: "speaker-submission:submission-1",
+        sessionTitle: "Descriptive accepted session",
+      }),
+      expect.objectContaining({
+        id: "manual-asset",
+        participantName: "Manual Speaker",
+      }),
     ]);
     expect(repository.readModelResources).toEqual([
       { profiles: true, tasks: true, assets: true },
@@ -1169,13 +1262,27 @@ describe("SpeakerService organizer roster read model", () => {
       participantIds: ["participant-1", "participant-2"],
     });
     repository.submissions.push(
-      { ...submission("submission-1", "participant-1"), title: "Shared session" },
-      { ...submission("submission-2", "participant-2"), title: "Shared session" },
+      {
+        ...submission("submission-1", "participant-1"),
+        title: "Shared session",
+      },
+      {
+        ...submission("submission-2", "participant-2"),
+        title: "Shared session",
+      },
       submission("submission-declined", "participant-1", "declined"),
     );
     repository.profiles.push(
-      { ...profile("participant-1"), displayName: "Shared Speaker", email: "shared@example.test" },
-      { ...profile("participant-2"), displayName: "Shared Speaker", email: "SHARED@example.test" },
+      {
+        ...profile("participant-1"),
+        displayName: "Shared Speaker",
+        email: "shared@example.test",
+      },
+      {
+        ...profile("participant-2"),
+        displayName: "Shared Speaker",
+        email: "SHARED@example.test",
+      },
       { ...profile("participant-manual"), displayName: "Manual Speaker" },
     );
     repository.roster.push(
@@ -1236,7 +1343,7 @@ describe("SpeakerService organizer roster read model", () => {
       task({
         id: "task-second",
         participantId: "participant-2",
-        submissionId: "submission-2",
+        sessionId: "speaker-submission:submission-2",
         type: "action",
       }),
       task({
@@ -1246,7 +1353,7 @@ describe("SpeakerService organizer roster read model", () => {
       task({
         id: "task-manual",
         participantId: "participant-manual",
-        submissionId: null,
+        sessionId: null,
         type: "action",
       }),
       task({
@@ -1258,7 +1365,7 @@ describe("SpeakerService organizer roster read model", () => {
       task({
         id: "task-declined",
         participantId: "participant-1",
-        submissionId: "submission-declined",
+        sessionId: "speaker-submission:submission-declined",
       }),
       task({
         id: "task-other-event",
@@ -1271,7 +1378,7 @@ describe("SpeakerService organizer roster read model", () => {
         id: "asset-accepted",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         taskId: "task-upload",
         kind: "slides",
@@ -1300,7 +1407,7 @@ describe("SpeakerService organizer roster read model", () => {
         id: "asset-foreign-tenant",
         tenantId: "org-2",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         kind: "slides",
         objectKey: "events/event-1/foreign",
@@ -1314,7 +1421,7 @@ describe("SpeakerService organizer roster read model", () => {
         id: "asset-declined",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-declined",
+        sessionId: "speaker-submission:submission-declined",
         participantId: "participant-1",
         kind: "slides",
         objectKey: "events/event-1/declined",
@@ -1340,6 +1447,7 @@ describe("SpeakerService organizer roster read model", () => {
       {
         speakerSender,
         now: () => new Date(now),
+        sessionAuthority: testSessionAuthority,
       },
     );
     const service = new SpeakerService(
@@ -1348,6 +1456,7 @@ describe("SpeakerService organizer roster read model", () => {
       {
         speakerSender,
         now: () => new Date(now),
+        sessionAuthority: testSessionAuthority,
       },
     );
 
@@ -1373,7 +1482,7 @@ describe("SpeakerService organizer roster read model", () => {
     const shared = roster.speakers.find((speaker) => speaker.participantId === "participant-1");
     expect(shared).toMatchObject({
       displayName: "Shared Speaker",
-      sessions: [{ submissionId: "speaker-submission:submission-1", title: "Shared session" }],
+      sessions: [],
       taskSummary: { total: 2, completed: 1, overdue: 0 },
       assets: [expect.objectContaining({ assetId: "asset-accepted" })],
     });
@@ -1534,6 +1643,7 @@ describe("SpeakerService organizer asset reads", () => {
       profiles: resources.profiles === true ? readModelRepository.profiles : [],
       tasks: [],
       assets: resources.assets === true ? readModelRepository.assets : [],
+      canonicalSessions: [],
     });
     const fallbackRepository = new OrganizerSpeakerRepository();
     configure(fallbackRepository);
@@ -1570,7 +1680,7 @@ describe("SpeakerService organizer asset reads", () => {
         id: "asset-other-tenant",
         tenantId: "other-org",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         kind: "slides",
         objectKey: "events/event-1/other/asset-other-tenant",
@@ -1584,7 +1694,7 @@ describe("SpeakerService organizer asset reads", () => {
         id: "asset-other-event",
         tenantId: "org-1",
         eventId: "event-2",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         kind: "slides",
         objectKey: "events/event-2/asset-other-event",
@@ -1598,7 +1708,7 @@ describe("SpeakerService organizer asset reads", () => {
         id: "asset-declined",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-declined",
+        sessionId: "speaker-submission:submission-declined",
         participantId: "participant-1",
         kind: "slides",
         objectKey: "events/event-1/asset-declined",
@@ -1637,7 +1747,7 @@ describe("SpeakerService organizer asset reads", () => {
         id: "manual-slides-v1",
         tenantId: "org-1",
         eventId: "event-1",
-        ...(manual.submissionId === undefined ? {} : { submissionId: manual.submissionId }),
+        ...(manual.submissionId === undefined ? {} : { sessionId: manual.submissionId }),
         participantId: manual.participantId,
         taskId: "manual-slides-task",
         versionFamilyId: "manual-slides",
@@ -1656,7 +1766,7 @@ describe("SpeakerService organizer asset reads", () => {
         id: "manual-slides-v2",
         tenantId: "org-1",
         eventId: "event-1",
-        ...(manual.submissionId === undefined ? {} : { submissionId: manual.submissionId }),
+        ...(manual.submissionId === undefined ? {} : { sessionId: manual.submissionId }),
         participantId: manual.participantId,
         taskId: "manual-slides-task",
         versionFamilyId: "manual-slides",
@@ -1703,6 +1813,17 @@ describe("SpeakerService organizer asset reads", () => {
         downloadUrl: null,
       }),
     ]);
+    const versionTwo = repository.assets.find((asset) => asset.id === "manual-slides-v2");
+    if (versionTwo === undefined) throw new Error("Expected the second asset version.");
+    repository.assets.push(
+      { ...versionTwo, id: "manual-slides-cross-task", taskId: "other-task", version: 3 },
+      {
+        ...versionTwo,
+        id: "manual-slides-cross-session",
+        sessionId: "another-session",
+        version: 3,
+      },
+    );
 
     const history = await service.listOrganizerAssetHistory(
       "event-1",
@@ -1764,7 +1885,10 @@ describe("SpeakerService organizer speaker writes", () => {
       });
 
       expect(roster.speakers).toEqual([
-        expect.objectContaining({ eventId: "event-1", participantId: "participant-1" }),
+        expect.objectContaining({
+          eventId: "event-1",
+          participantId: "participant-1",
+        }),
       ]);
     },
   );
@@ -1824,8 +1948,8 @@ describe("SpeakerService organizer speaker writes", () => {
       description: "General speaker onboarding task.",
       dueAt: "2027-04-01",
       assignments: [
-        { participantId: "participant-1", submissionId: null },
-        { participantId: "participant-2", submissionId: null },
+        { participantId: "participant-1", subject: { type: "participant" } },
+        { participantId: "participant-2", subject: { type: "participant" } },
       ],
     });
     expect(taskEnvelope.tasks.map((task) => task.participantId)).toEqual([
@@ -2071,7 +2195,12 @@ describe("SpeakerService organizer speaker writes", () => {
       title: "Confirm travel",
       description: "Confirm the travel plan.",
       dueAt: "2027-04-01",
-      assignments: [{ participantId: "participant:generated-1", submissionId: null }],
+      assignments: [
+        {
+          participantId: "participant:generated-1",
+          subject: { type: "participant" },
+        },
+      ],
     });
     const assignedTask = assignment.tasks[0];
     expect(assignedTask).toMatchObject({
@@ -2217,7 +2346,15 @@ describe("SpeakerService organizer speaker writes", () => {
         title: "Stale assignment",
         description: "Must not be assigned.",
         dueAt: "2027-04-01",
-        assignments: [{ participantId: "participant-stale", submissionId: null }],
+        assignments: [
+          {
+            participantId: "participant-stale",
+            subject: {
+              type: "session",
+              sessionId: "speaker-submission:session-stale",
+            },
+          },
+        ],
       }),
     ).rejects.toSatisfy((error: unknown) => {
       expectServiceError(error, "NOT_FOUND");
@@ -2231,9 +2368,21 @@ describe("SpeakerService organizer speaker writes", () => {
       title: "Canonical assignment",
       description: "Use the accepted submission.",
       dueAt: "2027-04-01",
-      assignments: [{ participantId: "participant-1", submissionId: "submission-1" }],
+      assignments: [
+        {
+          participantId: "participant-1",
+          subject: {
+            type: "session",
+            sessionId: "speaker-submission:submission-1",
+          },
+        },
+      ],
     });
-    expect(task?.submissionId).toBe("speaker-submission:submission-1");
+    expect(task?.subject).toEqual({
+      type: "session",
+      participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
+    });
     expect(
       (await service.listOrganizerTasks("event-1", "account-1")).find(
         (candidate) => candidate.id === task?.id,
@@ -2256,8 +2405,20 @@ describe("SpeakerService organizer speaker writes", () => {
       type: "action",
       title: "Confirm session details",
       assignments: [
-        { participantId: "participant-1", submissionId: "submission-1" },
-        { participantId: "participant-1", submissionId: "submission-1-breakout" },
+        {
+          participantId: "participant-1",
+          subject: {
+            type: "session",
+            sessionId: "speaker-submission:submission-1",
+          },
+        },
+        {
+          participantId: "participant-1",
+          subject: {
+            type: "session",
+            sessionId: "speaker-submission:submission-1-breakout",
+          },
+        },
       ],
     });
 
@@ -2266,12 +2427,12 @@ describe("SpeakerService organizer speaker writes", () => {
       {
         type: "session",
         participantId: "participant-1",
-        submissionId: "speaker-submission:submission-1",
+        sessionId: "speaker-submission:submission-1",
       },
       {
         type: "session",
         participantId: "participant-1",
-        submissionId: "speaker-submission:submission-1-breakout",
+        sessionId: "speaker-submission:submission-1-breakout",
       },
     ]);
     expect(new Set(tasks.map((task) => task.id)).size).toBe(2);
@@ -2283,7 +2444,11 @@ describe("SpeakerService organizer speaker writes", () => {
       task({
         id: "wrong-submission-assignee",
         participantId: "participant-1",
-        submissionId: "submission-2",
+        subject: {
+          type: "session",
+          participantId: "participant-1",
+          sessionId: "speaker-submission:submission-2",
+        },
         type: "action",
       }),
     );
@@ -2345,7 +2510,7 @@ describe("SpeakerService organizer speaker writes", () => {
       task({
         id: "profile-form",
         participantId: "participant-2",
-        submissionId: "submission-2",
+        sessionId: "speaker-submission:submission-2",
         type: "form",
         status: "submitted",
       }),
@@ -2370,7 +2535,7 @@ describe("SpeakerService organizer speaker writes", () => {
         }),
       ]),
     );
-    expect(roster.speakers.every((speaker) => speaker.sessions.length === 1)).toBe(true);
+    expect(roster.speakers.every((speaker) => speaker.sessions.length === 0)).toBe(true);
     expect(repository.rosterEventReads).toBe(0);
   });
   it("does not issue download grants while constructing the organizer roster", async () => {
@@ -2381,7 +2546,7 @@ describe("SpeakerService organizer speaker writes", () => {
         id: "roster-ready-asset",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         kind: "slides",
         objectKey: "events/event-1/participants/participant-1/slides/roster-ready-asset",
@@ -2395,7 +2560,7 @@ describe("SpeakerService organizer speaker writes", () => {
         id: "roster-pending-asset",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-1",
+        sessionId: "speaker-submission:submission-1",
         participantId: "participant-1",
         kind: "supporting_file",
         objectKey: "events/event-1/participants/participant-1/supporting_file/roster-pending-asset",
@@ -2590,7 +2755,12 @@ describe("SpeakerService portal access", () => {
       }),
     ]);
     await expect(service.getPortal("event-1", "account-1")).resolves.toMatchObject({
-      submissions: [expect.objectContaining({ id: "submission-draft", status: "submitted" })],
+      submissions: [
+        expect.objectContaining({
+          id: "submission-draft",
+          status: "submitted",
+        }),
+      ],
       profiles: [],
       tasks: [],
       context: {
@@ -2879,7 +3049,7 @@ describe("SpeakerService portal access", () => {
       id: "portal-asset",
       tenantId: "org-1",
       eventId: "event-1",
-      submissionId: "speaker-submission:submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       kind: "slides",
       objectKey: "events/event-1/participants/participant-1/slides/portal-asset",
@@ -2915,6 +3085,7 @@ describe("SpeakerService portal access", () => {
       new FakePrivateAssetGateway(),
       {
         speakerSender,
+        sessionAuthority: testSessionAuthority,
         now: () => new Date(now),
       },
     );
@@ -3015,7 +3186,7 @@ describe("SpeakerService portal access", () => {
       id: "portal-asset",
       tenantId: "org-1",
       eventId: "event-1",
-      submissionId: "speaker-submission:submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       kind: "slides",
       objectKey: "events/event-1/participants/participant-1/slides/portal-asset",
@@ -3070,6 +3241,7 @@ describe("SpeakerService portal access", () => {
     const gateway = new FakePrivateAssetGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: testSessionAuthority,
       now: () => new Date(now),
     });
 
@@ -3099,12 +3271,18 @@ describe("SpeakerService portal access", () => {
       wiki: 1,
     });
     expect(portal.submissions).toEqual([
-      expect.objectContaining({ id: "speaker-submission:submission-1", title: "Canonical title" }),
+      expect.objectContaining({
+        id: "speaker-submission:submission-1",
+        title: "Canonical title",
+      }),
     ]);
     expect(portal.tasks).toEqual([expect.objectContaining({ id: "portal-task" })]);
     expect(portal.assets).toEqual([expect.objectContaining({ id: "portal-asset" })]);
     expect(portal.roster?.members).toEqual([
-      expect.objectContaining({ participantId: "participant-1", role: "primary" }),
+      expect.objectContaining({
+        participantId: "participant-1",
+        role: "primary",
+      }),
     ]);
     expect(portal.resources).toEqual([expect.objectContaining({ id: "resource-1" })]);
     expect(portal.wiki).toEqual([expect.objectContaining({ id: "wiki-1" })]);
@@ -3135,12 +3313,12 @@ describe("SpeakerService portal access", () => {
       task({
         id: "task-primary",
         participantId: "participant-primary",
-        submissionId: "submission-primary",
+        sessionId: "speaker-submission:submission-primary",
       }),
       task({
         id: "task-co",
         participantId: "participant-co",
-        submissionId: "submission-co",
+        sessionId: "speaker-submission:submission-co",
       }),
     );
     repository.assets.push(
@@ -3148,7 +3326,7 @@ describe("SpeakerService portal access", () => {
         id: "asset-primary-ready",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-primary",
+        sessionId: "speaker-submission:submission-primary",
         participantId: "participant-primary",
         kind: "slides",
         objectKey: "events/event-1/participants/participant-primary/slides/ready",
@@ -3162,7 +3340,7 @@ describe("SpeakerService portal access", () => {
         id: "asset-primary-pending",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-primary",
+        sessionId: "speaker-submission:submission-primary",
         participantId: "participant-primary",
         kind: "supporting_file",
         objectKey: "events/event-1/participants/participant-primary/supporting/pending",
@@ -3176,7 +3354,7 @@ describe("SpeakerService portal access", () => {
         id: "asset-co-ready",
         tenantId: "org-1",
         eventId: "event-1",
-        submissionId: "submission-co",
+        sessionId: "speaker-submission:submission-co",
         participantId: "participant-co",
         kind: "slides",
         objectKey: "events/event-1/participants/participant-co/slides/ready",
@@ -3227,6 +3405,7 @@ describe("SpeakerService portal access", () => {
     const gateway = new FakePrivateAssetGateway();
     const service = new SpeakerService(withTestSpeakerOrganizerLifecycle(repository), gateway, {
       speakerSender,
+      sessionAuthority: testSessionAuthority,
       now: () => new Date(now),
     });
 
@@ -3349,7 +3528,10 @@ describe("SpeakerService portal access", () => {
     const portal = await service.getPortal("event-1", "account-1");
     expect(portal.capabilities).toContain("roster-manage");
     expect(portal.roster?.members).toEqual([
-      expect.objectContaining({ participantId: "participant-1", role: "primary" }),
+      expect.objectContaining({
+        participantId: "participant-1",
+        role: "primary",
+      }),
     ]);
     const initial = await service.getRoster("event-1", "account-1", "submission-1");
     expect(initial.submissionId).toBe("submission-1");
@@ -3373,7 +3555,10 @@ describe("SpeakerService portal access", () => {
     });
     expect(added.members).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ participantId: "participant-co", role: "co_speaker" }),
+        expect.objectContaining({
+          participantId: "participant-co",
+          role: "co_speaker",
+        }),
       ]),
     );
     const stored = repository.roster.find((entry) => entry.participantId === "participant-co");
@@ -3429,7 +3614,10 @@ describe("SpeakerService portal access", () => {
     });
     expect(removed.members).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ participantId: "participant-co", status: "revoked" }),
+        expect.objectContaining({
+          participantId: "participant-co",
+          status: "revoked",
+        }),
       ]),
     );
 
@@ -3482,7 +3670,7 @@ describe("SpeakerService portal access", () => {
     });
   });
   it("keeps dual-role portal reads at speaker-grant scope while organizer reads stay explicit", async () => {
-    const { service } = createDualRoleFixture();
+    const { repository, service } = createDualRoleFixture();
 
     expect((await service.listSubmissions("event-1", "account-1")).map(({ id }) => id)).toEqual([
       "submission-1",
@@ -3498,6 +3686,24 @@ describe("SpeakerService portal access", () => {
     expect((await service.listAssets("event-1", "account-1")).map(({ id }) => id)).toEqual([
       "dual-role-asset-1",
     ]);
+    const existingAsset = repository.assets[0];
+    if (existingAsset === undefined) throw new Error("Expected the dual-role asset fixture.");
+    repository.assets.push({
+      ...existingAsset,
+      id: "dual-role-cross-task",
+      taskId: "other-task",
+      objectKey: "events/event-1/participants/participant-1/slides/dual-role-cross-task",
+    });
+    repository.comments.push({
+      id: "dual-role-cross-task-comment",
+      eventId: "event-1",
+      assetId: "dual-role-cross-task",
+      versionId: "dual-role-cross-task",
+      body: "Other task comment",
+      authorLabel: "Speaker",
+      createdAt: now,
+      version: 1,
+    });
     expect(
       (await service.listAssetComments("event-1", "account-1", "dual-role-asset-1")).map(
         ({ id }) => id,
@@ -3510,6 +3716,14 @@ describe("SpeakerService portal access", () => {
       expectServiceError(error, "NOT_FOUND");
       return true;
     });
+    repository.assets.splice(
+      repository.assets.findIndex(({ id }) => id === "dual-role-cross-task"),
+      1,
+    );
+    repository.comments.splice(
+      repository.comments.findIndex(({ id }) => id === "dual-role-cross-task-comment"),
+      1,
+    );
 
     expect(
       (await service.listOrganizerProfiles("event-1", "account-1")).map(
@@ -3600,7 +3814,11 @@ describe("SpeakerService capability and canonical task scope", () => {
       task({
         id: "reused-participant-cross-submission-task",
         participantId: "participant-1",
-        submissionId: "submission-2",
+        subject: {
+          type: "session",
+          participantId: "participant-1",
+          sessionId: "speaker-submission:submission-2",
+        },
       }),
     );
 
@@ -3727,6 +3945,34 @@ describe("SpeakerService task workflow", () => {
       }),
     ]);
   });
+  it("preserves the canonical program-session title in task transition responses", async () => {
+    const { repository, service } = createFixture();
+    repository.tasks.push(
+      task({
+        id: "session-title-task",
+        participantId: "participant-1",
+        subject: {
+          type: "session",
+          participantId: "participant-1",
+          sessionId: "session-title",
+        },
+      }),
+    );
+
+    const result = await service.transitionTask({
+      eventId: "event-1",
+      accountId: "account-1",
+      taskId: "session-title-task",
+      toStatus: "in_progress",
+      expectedVersion: 0,
+    });
+
+    expect(result.task).toMatchObject({
+      status: "in_progress",
+      version: 1,
+      sessionTitle: "Descriptive accepted session",
+    });
+  });
 
   it("allows action completion but prevents speakers from forcing organizer-owned states", async () => {
     const { repository, service } = createFixture();
@@ -3767,7 +4013,7 @@ describe("SpeakerService task workflow", () => {
     expect(repository.transitions).toHaveLength(1);
   });
 
-  it("keeps tasks inactive until their submission is accepted", async () => {
+  it("does not expose tasks until their program session is accepted", async () => {
     const { service } = createFixture();
 
     await expect(
@@ -3779,7 +4025,7 @@ describe("SpeakerService task workflow", () => {
         expectedVersion: 0,
       }),
     ).rejects.toSatisfy((error: unknown) => {
-      expectServiceError(error, "TASK_NOT_ACTIVE");
+      expectServiceError(error, "NOT_FOUND");
       return true;
     });
   });
@@ -3955,6 +4201,7 @@ describe("SpeakerService private asset authorization", () => {
       accountId: "account-1",
       participantId: "participant-1",
       taskId: "slides-task",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       fileName: "conference-slides.pptx",
       contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -3964,6 +4211,7 @@ describe("SpeakerService private asset authorization", () => {
       eventId: "event-1",
       accountId: "account-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "supporting_file",
       fileName: "speaker-notes.docx",
       contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -4028,6 +4276,7 @@ describe("SpeakerService private asset authorization", () => {
       id: "asset-1",
       eventId: "event-1",
       participantId: "participant-1",
+      sessionId: "speaker-submission:submission-1",
       kind: "slides",
       objectKey: "events/event-1/participants/participant-1/slides/asset-1",
       fileName: "slides.pdf",
@@ -4083,7 +4332,9 @@ describe("speaker routes", () => {
     expect(portal.status).toBe(200);
     expect(portal.headers.get("cache-control")).toBe("private, no-store");
     expect(portal.headers.get("x-request-id")).toBe(requestId);
-    expect(await portal.json()).toMatchObject({ data: { outstandingTaskCount: 2 } });
+    expect(await portal.json()).toMatchObject({
+      data: { outstandingTaskCount: 2 },
+    });
 
     const crossUser = await app.request("/events/event-1/profiles/participant-2", {
       method: "PATCH",
@@ -4104,7 +4355,7 @@ describe("speaker routes", () => {
       id: "route-private-asset",
       tenantId: "org-1",
       eventId: "event-1",
-      submissionId: "submission-1",
+      sessionId: "speaker-submission:submission-1",
       participantId: "participant-1",
       kind: "slides",
       objectKey: "private/r2/secret-route-private-asset",
@@ -4286,7 +4537,10 @@ describe("organizer task reminder offsets", () => {
           expectedVersion: current.version,
           reminderOffsetsMinutes: [1_440],
         }),
-      ).rejects.toMatchObject({ code: "TASK_REMINDERS_NOT_EDITABLE", status: 409 });
+      ).rejects.toMatchObject({
+        code: "TASK_REMINDERS_NOT_EDITABLE",
+        status: 409,
+      });
       expect(repository.tasks.find((candidate) => candidate.id === current.id)?.version).toBe(2);
     },
   );
@@ -4315,7 +4569,10 @@ describe("organizer task reminder offsets", () => {
         expectedVersion: current.version,
         reminderOffsetsMinutes: [1_440],
       }),
-    ).rejects.toMatchObject({ code: "TASK_REMINDERS_NOT_EDITABLE", status: 409 });
+    ).rejects.toMatchObject({
+      code: "TASK_REMINDERS_NOT_EDITABLE",
+      status: 409,
+    });
   });
 
   it("rejects a task without a due date", async () => {
@@ -4336,7 +4593,10 @@ describe("organizer task reminder offsets", () => {
         expectedVersion: current.version,
         reminderOffsetsMinutes: [1_440],
       }),
-    ).rejects.toMatchObject({ code: "TASK_REMINDERS_NOT_EDITABLE", status: 409 });
+    ).rejects.toMatchObject({
+      code: "TASK_REMINDERS_NOT_EDITABLE",
+      status: 409,
+    });
   });
 });
 
@@ -4366,7 +4626,10 @@ describe("canonical speaker admin routes", () => {
     const response = await app.request(endpoint, {
       method: "PUT",
       headers,
-      body: JSON.stringify({ expectedVersion: 2, reminderOffsetsMinutes: [1_440, 0] }),
+      body: JSON.stringify({
+        expectedVersion: 2,
+        reminderOffsetsMinutes: [1_440, 0],
+      }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -4393,7 +4656,11 @@ describe("canonical speaker admin routes", () => {
       { expectedVersion: 2, reminderOffsetsMinutes: [60, 60] },
       { expectedVersion: 2, reminderOffsetsMinutes: [-1] },
       { expectedVersion: 2, reminderOffsetsMinutes: [30] },
-      { expectedVersion: 2, reminderOffsetsMinutes: [60], title: "Not allowed" },
+      {
+        expectedVersion: 2,
+        reminderOffsetsMinutes: [60],
+        title: "Not allowed",
+      },
     ]) {
       const invalid = await app.request(endpoint, {
         method: "PUT",
@@ -4401,7 +4668,9 @@ describe("canonical speaker admin routes", () => {
         body: JSON.stringify(body),
       });
       expect(invalid.status).toBe(400);
-      expect(await invalid.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+      expect(await invalid.json()).toMatchObject({
+        error: { code: "VALIDATION_ERROR" },
+      });
     }
     expect(update).toHaveBeenCalledTimes(1);
   });
@@ -4428,13 +4697,24 @@ describe("canonical speaker admin routes", () => {
             title: "Invalid deadline task",
             description: "Must not reach the service.",
             dueAt,
-            assignments: [{ participantId: "participant-1", submissionId: "submission-1" }],
+            assignments: [
+              {
+                participantId: "participant-1",
+                subject: {
+                  type: "session",
+                  participantId: "participant-1",
+                  sessionId: "speaker-submission:submission-1",
+                },
+              },
+            ],
           }),
         },
       );
 
       expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+      expect(await response.json()).toMatchObject({
+        error: { code: "VALIDATION_ERROR" },
+      });
       expect(assign).not.toHaveBeenCalled();
     },
   );
@@ -4550,7 +4830,16 @@ describe("canonical speaker admin routes", () => {
         title: "Confirm session",
         description: "Confirm the session details.",
         dueAt: "2027-04-01",
-        assignments: [{ participantId: "participant-1", submissionId: "submission-1" }],
+        assignments: [
+          {
+            participantId: "participant-1",
+            subject: {
+              type: "session",
+              participantId: "participant-1",
+              sessionId: "speaker-submission:submission-1",
+            },
+          },
+        ],
       }),
     });
     expect(task.status).toBe(201);
@@ -4770,7 +5059,12 @@ describe("speaker temporal integrity", () => {
           type: "action",
           title: "Invalid deadline task",
           dueAt,
-          assignments: [{ participantId: "participant-1", submissionId: null }],
+          assignments: [
+            {
+              participantId: "participant-1",
+              subject: { type: "participant" },
+            },
+          ],
         }),
       ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
       expect(repository.tasks).toEqual([]);
@@ -4789,7 +5083,7 @@ describe("speaker temporal integrity", () => {
         type: "action",
         title: "Past task",
         dueAt: "2026-08-07",
-        assignments: [{ participantId: "participant-1", submissionId: null }],
+        assignments: [{ participantId: "participant-1", subject: { type: "participant" } }],
       }),
     ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
 
@@ -4799,7 +5093,7 @@ describe("speaker temporal integrity", () => {
       type: "action",
       title: "After event task",
       dueAt: "2026-08-20",
-      assignments: [{ participantId: "participant-1", submissionId: null }],
+      assignments: [{ participantId: "participant-1", subject: { type: "participant" } }],
     });
     expect(created[0]?.dueAt).toBe("2026-08-20");
     await expect(
@@ -4823,7 +5117,10 @@ describe("speaker temporal integrity", () => {
         title: "Historical task renamed",
         dueAt: "2026-08-07",
       }),
-    ).resolves.toMatchObject({ dueAt: "2026-08-07", title: "Historical task renamed" });
+    ).resolves.toMatchObject({
+      dueAt: "2026-08-07",
+      title: "Historical task renamed",
+    });
 
     await expect(
       service.updateOrganizerTask({
@@ -4849,13 +5146,13 @@ describe("speaker temporal integrity", () => {
       maxBytes: 5_000_000,
       dueAt: "2026-08-08",
       reminderOffsetsMinutes: [0],
-      assignments: [{ participantId: "participant-1", submissionId: null }],
+      assignments: [{ participantId: "participant-1", subject: { type: "participant" } }],
     });
     repository.tasks.push(
       task({
         id: "boundary-action",
         participantId: "participant-1",
-        submissionId: null,
+        subject: { type: "participant", participantId: "participant-1" },
         type: "action",
         dueAt: "2026-08-08",
       }),
@@ -4865,7 +5162,10 @@ describe("speaker temporal integrity", () => {
       items: [{ status: "not_started" }],
     });
     await expect(
-      beforeBoundary.previewReminderEligibility({ eventId: "event-1", accountId: "account-1" }),
+      beforeBoundary.previewReminderEligibility({
+        eventId: "event-1",
+        accountId: "account-1",
+      }),
     ).resolves.toMatchObject({
       items: [
         {
@@ -4885,7 +5185,10 @@ describe("speaker temporal integrity", () => {
       items: [{ status: "overdue" }],
     });
     await expect(
-      atBoundary.previewReminderEligibility({ eventId: "event-1", accountId: "account-1" }),
+      atBoundary.previewReminderEligibility({
+        eventId: "event-1",
+        accountId: "account-1",
+      }),
     ).resolves.toMatchObject({
       items: [
         {
@@ -4920,7 +5223,7 @@ describe("speaker temporal integrity", () => {
         task({
           id: "transition-upload",
           participantId: "participant-1",
-          submissionId: null,
+          subject: { type: "participant", participantId: "participant-1" },
           type: "upload",
           dueAt,
           reminderOffsetsMinutes: [0],
@@ -4955,7 +5258,10 @@ describe("speaker temporal integrity", () => {
         items: [{ status: "overdue" }],
       });
       await expect(
-        atDeadline.previewReminderEligibility({ eventId: "event-1", accountId: "account-1" }),
+        atDeadline.previewReminderEligibility({
+          eventId: "event-1",
+          accountId: "account-1",
+        }),
       ).resolves.toMatchObject({
         items: [{ deadlineAt, eligible: true, reason: "due" }],
       });
@@ -5110,8 +5416,8 @@ it("persists logistics, exposes reminder eligibility, and queues a versioned bul
     dueAt: "2026-08-08",
     reminderOffsetsMinutes: [1_440],
     assignments: [
-      { participantId: "participant-1", submissionId: null },
-      { participantId: "participant-2", submissionId: null },
+      { participantId: "participant-1", subject: { type: "participant" } },
+      { participantId: "participant-2", subject: { type: "participant" } },
     ],
   });
   expect(task).toHaveLength(2);
@@ -5204,7 +5510,10 @@ it("does not send invitation email when pending persistence fails for a verified
   const communicationFixture = testSpeakerCommunications({
     send(input) {
       deliveries.push({ participantId: input.recipientId, text: input.text });
-      return Promise.resolve({ status: "queued", providerMessageId: "unexpected-delivery" });
+      return Promise.resolve({
+        status: "queued",
+        providerMessageId: "unexpected-delivery",
+      });
     },
   });
   const sendInvitations = vi.spyOn(communicationFixture.communications, "sendInvitations");
@@ -5252,7 +5561,10 @@ it("still sends a non-authoritative work-hub invitation when no verified account
   const communicationFixture = testSpeakerCommunications({
     send(input) {
       deliveries.push({ participantId: input.recipientId, text: input.text });
-      return Promise.resolve({ status: "queued", providerMessageId: "invite-receipt" });
+      return Promise.resolve({
+        status: "queued",
+        providerMessageId: "invite-receipt",
+      });
     },
   });
   const invitationCreator = { create: vi.fn().mockResolvedValue(undefined) };
@@ -5435,7 +5747,11 @@ it("queues due scheduled reminders idempotently without sending ineligible tasks
             participantId: input.recipient.participantId,
             taskIds: input.recipient.taskIds,
           });
-          return Promise.resolve({ id: "reminder-receipt-1", queued: true, duplicate: false });
+          return Promise.resolve({
+            id: "reminder-receipt-1",
+            queued: true,
+            duplicate: false,
+          });
         },
       },
     },

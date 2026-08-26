@@ -37,7 +37,7 @@ export function PortalTaskDetail({ task }: Readonly<{ task: PortalTask }>) {
   const { busyTaskIds, context, transitionTask, view, workspace } = usePortal();
   const [note, setNote] = useState("");
   if (!view) return null;
-  const subject = taskSubjectPresentation(task, view.profiles, view.submissions);
+  const subject = taskSubjectPresentation(task, view.profiles);
   const dependencies = task.dependencyIds.map((id) =>
     view.tasks.find((candidate) => candidate.id === id),
   );

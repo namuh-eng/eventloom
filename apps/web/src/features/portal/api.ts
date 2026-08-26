@@ -49,7 +49,12 @@ export type PortalProfileDto = Omit<PortalProfile, "headshotAssetId"> & {
 export type PortalSocialNetwork = "twitter" | "linkedin";
 
 function isLocalHostname(value: string): boolean {
-  return value === "localhost" || value === "127.0.0.1" || value === "[::1]";
+  return (
+    value === "localhost" ||
+    value.endsWith(".localhost") ||
+    value === "127.0.0.1" ||
+    value === "[::1]"
+  );
 }
 function isSafeSocialHandle(value: string): boolean {
   return /^@?[A-Za-z0-9._-]{1,200}$/u.test(value);
@@ -123,12 +128,13 @@ export interface PortalApi {
     eventId: string;
     participantId: string;
     taskId: string;
+    sessionId?: string;
     kind: "headshot" | "slides" | "supporting_file";
     file: File;
     supersedesAssetId?: string;
     expectedLatestVersion?: number;
     idempotencyKey?: string;
-  }): Promise<{ assetId: string }>;
+  }): Promise<PortalAsset>;
 
   getRoster?(
     eventId: string,
@@ -179,7 +185,7 @@ export interface PortalApi {
   uploadFile?(input: {
     eventId: string;
     participantId: string;
-    submissionId?: string;
+    sessionId?: string;
     taskId?: string;
     kind: "headshot" | "slides" | "supporting_file";
     file: File;
@@ -341,7 +347,7 @@ export function createPortalApi(baseUrl: string, fetcher: Fetcher = fetch): Port
   async function createUpload(input: {
     eventId: string;
     participantId: string;
-    submissionId?: string;
+    sessionId?: string;
     taskId?: string;
     kind: "headshot" | "slides" | "supporting_file";
     file: File;
@@ -357,7 +363,7 @@ export function createPortalApi(baseUrl: string, fetcher: Fetcher = fetch): Port
             "replacement",
             input.eventId,
             input.participantId,
-            input.submissionId ?? "",
+            input.sessionId ?? "",
             input.taskId ?? "",
             input.kind,
             input.supersedesAssetId,
@@ -380,7 +386,7 @@ export function createPortalApi(baseUrl: string, fetcher: Fetcher = fetch): Port
         },
         body: JSON.stringify({
           participantId: input.participantId,
-          ...(input.submissionId === undefined ? {} : { submissionId: input.submissionId }),
+          ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
           ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
           kind: input.kind,
           fileName: input.file.name,
@@ -524,8 +530,7 @@ export function createPortalApi(baseUrl: string, fetcher: Fetcher = fetch): Port
     },
 
     async uploadTaskFile(input) {
-      const asset = await createUpload(input);
-      return { assetId: asset.id };
+      return createUpload(input);
     },
 
     async getRoster(eventId, submissionId, signal) {

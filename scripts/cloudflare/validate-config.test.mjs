@@ -30,6 +30,26 @@ INSERT INTO children SELECT * FROM _0099_children;
 DROP TABLE _0099_children;
 DROP TABLE _0099_parents;
 `;
+const safeSelfReferenceRebuild = `
+CREATE TABLE _0099_nodes AS SELECT * FROM nodes;
+DROP TABLE nodes;
+CREATE TABLE nodes (
+  id text PRIMARY KEY NOT NULL,
+  parent_id text,
+  FOREIGN KEY (parent_id) REFERENCES nodes(id)
+) STRICT;
+INSERT INTO nodes SELECT * FROM _0099_nodes;
+DROP TABLE _0099_nodes;
+`;
+const safePreservationHelperRebuild = safeDependencyRebuild
+  .replace(
+    "CREATE TABLE _0099_children AS SELECT * FROM children;",
+    "CREATE TABLE _0099_children AS SELECT * FROM children;\nCREATE TABLE _0099_preserve_children AS SELECT * FROM children;",
+  )
+  .replace(
+    "DROP TABLE _0099_children;",
+    "DROP TABLE _0099_preserve_children;\nDROP TABLE _0099_children;",
+  );
 
 function assertDestructive(sql) {
   assert.throws(
@@ -66,6 +86,35 @@ test("rejects duplicate migration ordinals even when filenames differ", () => {
 
 test("accepts a migration-scoped snapshot rebuild in dependency-safe phase order", () => {
   assert.doesNotThrow(() => validateMigrationSql("0099_test.sql", safeDependencyRebuild));
+});
+test("accepts a snapshot-backed delete that is restored before helper cleanup", () => {
+  assert.doesNotThrow(() =>
+    validateMigrationSql(
+      "0099_test.sql",
+      safeDependencyRebuild.replace(
+        "DROP TABLE children;",
+        "DELETE FROM children;\nDROP TABLE children;",
+      ),
+    ),
+  );
+  assertDestructive(
+    safeDependencyRebuild.replace(
+      "DROP TABLE children;",
+      "DELETE FROM audit_log;\nDROP TABLE children;",
+    ),
+  );
+});
+test("accepts a migration-scoped self-referencing snapshot rebuild", () => {
+  assert.doesNotThrow(() => validateMigrationSql("0099_test.sql", safeSelfReferenceRebuild));
+});
+test("accepts a migration-scoped preservation helper with an exact source snapshot", () => {
+  assert.doesNotThrow(() => validateMigrationSql("0099_test.sql", safePreservationHelperRebuild));
+  assertDestructive(
+    safePreservationHelperRebuild.replace(
+      "CREATE TABLE _0099_preserve_children AS SELECT * FROM children;\n",
+      "",
+    ),
+  );
 });
 
 test("rejects incomplete or lossy snapshot rebuilds", () => {
@@ -113,6 +162,15 @@ test("rejects arbitrary destructive migration operations", () => {
     "DELETE FROM widgets;",
   ]) {
     assertDestructive(`${destructiveSql}\nPRAGMA foreign_keys = ON;`);
+  }
+});
+test("rejects conditional and aliased deletes standalone and beside a valid rebuild", () => {
+  for (const deleteStatement of [
+    "DELETE FROM parents WHERE id = 'parent-1';",
+    "DELETE FROM parents AS parent;",
+  ]) {
+    assertDestructive(`${deleteStatement}\nPRAGMA foreign_keys = ON;`);
+    assertDestructive(`${safeDependencyRebuild}\n${deleteStatement}`);
   }
 });
 

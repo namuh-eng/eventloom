@@ -20,6 +20,8 @@ export function useOrganizerAuthoringController(props: OrganizerAuthoringProps) 
     reviewers: lifecycle.reviewerMembers,
     defaultMaxAssignments: lifecycle.maxAssignmentsPerReviewer,
     onSaved: lifecycle.onAssignmentsPersisted,
+    onSaveStart: () => assignments.blockAssignmentsForReviewerPoolSave(),
+    onSaveFinished: () => assignments.unblockAssignmentsAfterReviewerPoolSave(),
   });
   return { ...lifecycle, reviewerPool };
 }

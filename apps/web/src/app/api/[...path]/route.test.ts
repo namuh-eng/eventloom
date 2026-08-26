@@ -34,8 +34,12 @@ describe("same-origin API proxy", () => {
     vi.stubGlobal("fetch", fetcher);
 
     const response = await GET(
-      new NextRequest("https://web.example.test/api/admin/events?status=active", {
-        headers: { cookie: "session=opaque" },
+      new NextRequest("http://localhost:3015/api/admin/events?status=active", {
+        headers: {
+          cookie: "session=opaque",
+          host: "web.example.test",
+          origin: "https://web.example.test",
+        },
       }),
       context,
     );

@@ -41,6 +41,74 @@ const stringValue = (value: unknown): string => String(value);
 const nullableString = (value: unknown): string | null => (value == null ? null : String(value));
 const numberValue = (value: unknown): number => Number(value);
 
+function eventProjectionStatements(
+  database: D1Database,
+  projection: CrmEventProjection,
+  contact: CrmContact,
+): readonly D1PreparedStatement[] {
+  const displayParts = contact.displayName.trim().split(/\s+/u).filter(Boolean);
+  const firstName = contact.firstName?.trim() || displayParts[0] || contact.displayName;
+  const lastName = contact.lastName?.trim() || displayParts.slice(1).join(" ");
+  const email = contact.email?.trim() ?? "";
+  const biographyValue = contact.customFields.biography ?? contact.customFields.bio;
+  const biography = typeof biographyValue === "string" ? biographyValue : (contact.notes ?? "");
+  const socialLinks = {
+    ...(contact.website === null ? {} : { website: contact.website }),
+    ...(contact.linkedinUrl === null ? {} : { linkedin: contact.linkedinUrl }),
+  };
+  const statements = [
+    statement(
+      database,
+      `INSERT OR IGNORE INTO participants
+       (id,organization_id,event_id,first_name,last_name,display_name,email,normalized_email,identity_state,source_type,source_id,claimed_user_id,version,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?, 'resolved','crm',?,NULL,1,?,?)`,
+      [
+        projection.participantId,
+        projection.organizationId,
+        projection.eventId,
+        firstName,
+        lastName,
+        contact.displayName,
+        email,
+        email.toLowerCase(),
+        contact.id,
+        projection.createdAt,
+        projection.updatedAt,
+      ],
+    ),
+  ];
+  if (projection.role !== "speaker") return statements;
+
+  const profileId = `profile:${projection.eventId}:${projection.participantId}`;
+  statements.push(
+    statement(
+      database,
+      `INSERT OR IGNORE INTO speaker_profiles
+       (id,organization_id,event_id,participant_id,display_name,email,job_title,company,status,biography,social_links_json,travel_required,arrival_at,departure_at,accommodation,dietary_requirements,accessibility_needs,travel_notes,headshot_asset_id,source_type,source_id,version,created_at,updated_at,admitted_by_account_id,admitted_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,0,NULL,NULL,'','','','',NULL,'crm',?,1,?,?,?,?)`,
+      [
+        profileId,
+        projection.organizationId,
+        projection.eventId,
+        projection.participantId,
+        contact.displayName,
+        email,
+        contact.title ?? "",
+        contact.company ?? "",
+        "pending",
+        biography,
+        json(socialLinks),
+        contact.id,
+        projection.createdAt,
+        projection.updatedAt,
+        projection.createdBy,
+        projection.createdAt,
+      ],
+    ),
+  );
+  return statements;
+}
+
 function contactFromRow(row: Row, tags: readonly string[] = []): CrmContact {
   return {
     id: stringValue(row.id),
@@ -818,71 +886,121 @@ export class D1CrmRepository implements CrmRepository {
       throw new CrmRepositoryConflictError(
         "The projected contact does not belong to this organization.",
       );
-    const existing = await statement(
+    const exact = await statement(
       this.database,
-      "SELECT * FROM crm_participant_links WHERE organization_id=? AND event_id=? AND (participant_id=? OR crm_contact_id=?) ORDER BY CASE WHEN participant_id=? THEN 0 ELSE 1 END LIMIT 1",
-      [
-        projection.organizationId,
-        projection.eventId,
-        projection.participantId,
-        projection.crmContactId,
-        projection.participantId,
-      ],
+      "SELECT * FROM crm_participant_links WHERE organization_id=? AND event_id=? AND crm_contact_id=? ORDER BY id LIMIT 1",
+      [projection.organizationId, projection.eventId, projection.crmContactId],
     ).first<Row>();
-    if (existing !== null) return projectionFromRow(existing);
+    if (exact !== null) {
+      const saved = projectionFromRow(exact);
+      await batch(this.database, [
+        guard(
+          this.database,
+          "EXISTS (SELECT 1 FROM crm_contacts WHERE organization_id=? AND id=?) AND EXISTS (SELECT 1 FROM events WHERE organization_id=? AND id=?)",
+          [saved.organizationId, saved.crmContactId, saved.organizationId, saved.eventId],
+        ),
+        ...eventProjectionStatements(this.database, saved, contact),
+      ]);
+      return saved;
+    }
+
+    const defaultParticipantId = `crm-participant:${projection.eventId}:${projection.crmContactId}`;
+    const candidate = await statement(
+      this.database,
+      "SELECT id FROM participants WHERE organization_id=? AND event_id=? AND id=? LIMIT 1",
+      [projection.organizationId, projection.eventId, projection.participantId],
+    ).first<Row>();
+    if (candidate === null && projection.participantId !== defaultParticipantId)
+      throw new CrmRepositoryConflictError("The pinned participant does not exist.");
+    const normalizedEmail = contact.email?.trim().toLowerCase() ?? "";
+    const emailMatch =
+      candidate === null && normalizedEmail !== ""
+        ? await statement(
+            this.database,
+            "SELECT id FROM participants WHERE organization_id=? AND event_id=? AND identity_state='resolved' AND normalized_email=? COLLATE NOCASE LIMIT 1",
+            [projection.organizationId, projection.eventId, normalizedEmail],
+          ).first<Row>()
+        : null;
+    const matchedParticipant = candidate ?? emailMatch;
+    const participantId =
+      matchedParticipant === null ? defaultParticipantId : stringValue(matchedParticipant.id);
+    const linkedContact = await statement(
+      this.database,
+      "SELECT crm_contact_id FROM crm_participant_links WHERE organization_id=? AND event_id=? AND participant_id=? ORDER BY id LIMIT 1",
+      [projection.organizationId, projection.eventId, participantId],
+    ).first<Row>();
+    if (
+      linkedContact !== null &&
+      stringValue(linkedContact.crm_contact_id) !== projection.crmContactId
+    ) {
+      throw new CrmRepositoryConflictError(
+        "The participant is already linked to another CRM contact.",
+      );
+    }
+    const resolvedProjection: CrmEventProjection = { ...projection, participantId };
+    const [participantStatement, ...profileStatements] = eventProjectionStatements(
+      this.database,
+      resolvedProjection,
+      contact,
+    );
+    if (participantStatement === undefined) {
+      throw new CrmRepositoryConflictError("The canonical participant could not be materialized.");
+    }
     try {
       await batch(this.database, [
         guard(
           this.database,
           "EXISTS (SELECT 1 FROM crm_contacts WHERE organization_id=? AND id=?) AND EXISTS (SELECT 1 FROM events WHERE organization_id=? AND id=?)",
           [
-            projection.organizationId,
-            projection.crmContactId,
-            projection.organizationId,
-            projection.eventId,
+            resolvedProjection.organizationId,
+            resolvedProjection.crmContactId,
+            resolvedProjection.organizationId,
+            resolvedProjection.eventId,
           ],
         ),
+        participantStatement,
         statement(
           this.database,
           "INSERT INTO crm_participant_links (id,organization_id,event_id,participant_id,crm_contact_id,source_crm_contact_id,merge_audit_id,session_id,role,note,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
           [
-            projection.id,
-            projection.organizationId,
-            projection.eventId,
-            projection.participantId,
-            projection.crmContactId,
-            projection.sourceCrmContactId ?? null,
-            projection.mergeAuditId ?? null,
-            projection.sessionId,
-            projection.role,
-            projection.note,
-            projection.createdBy,
-            projection.createdAt,
-            projection.updatedAt,
+            resolvedProjection.id,
+            resolvedProjection.organizationId,
+            resolvedProjection.eventId,
+            resolvedProjection.participantId,
+            resolvedProjection.crmContactId,
+            resolvedProjection.sourceCrmContactId ?? null,
+            resolvedProjection.mergeAuditId ?? null,
+            resolvedProjection.sessionId,
+            resolvedProjection.role,
+            resolvedProjection.note,
+            resolvedProjection.createdBy,
+            resolvedProjection.createdAt,
+            resolvedProjection.updatedAt,
           ],
         ),
+        ...profileStatements,
         ...consequentialStatements(this.database, {
-          tenantId: projection.organizationId,
-          eventId: projection.eventId,
+          tenantId: resolvedProjection.organizationId,
+          eventId: resolvedProjection.eventId,
           action: "created",
           resourceType: "crm_participant_link",
-          resourceId: projection.id,
+          resourceId: resolvedProjection.id,
           resourceVersion: 1,
-          occurredAt: projection.updatedAt,
-          after: projection,
-          sync: { entityType: "crm_participant_link", payload: projection },
+          occurredAt: resolvedProjection.updatedAt,
+          after: resolvedProjection,
+          sync: { entityType: "crm_participant_link", payload: resolvedProjection },
         }),
       ]);
     } catch (error) {
       const concurrent = await this.getProjection(
-        projection.organizationId,
-        projection.eventId,
-        projection.crmContactId,
+        resolvedProjection.organizationId,
+        resolvedProjection.eventId,
+        resolvedProjection.crmContactId,
       );
-      if (concurrent !== null) return concurrent;
+      if (concurrent !== null) return this.saveProjection(concurrent, contact);
       throw this.conflict(error, "The event projection could not be saved.");
     }
-    return projection;
+    return resolvedProjection;
   }
   async listProjections(organizationId: string): Promise<readonly CrmEventProjection[]> {
     const result = await statement(

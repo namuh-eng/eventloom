@@ -1785,6 +1785,7 @@
   width: min(46rem, calc(100vw - 2rem));
   max-width: 46rem;
   gap: 0;
+  max-height: calc(100dvh - 2rem);
   overflow: hidden;
   padding: 0;
   border-radius: 1.35rem;
@@ -1821,7 +1822,28 @@
   letter-spacing: -0.035em;
 }
 
+.agendaEditorConflictPanel {
+  margin: 1rem 1.5rem 0;
+}
+
+.agendaEditorConflictPanel ul {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.65rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.agendaEditorConflictPanel li {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.agendaEditorConflictPanel li strong {
+  text-transform: capitalize;
+}
 .agendaEditorBody {
+  min-height: 0;
+  overflow-y: auto;
   padding: 1.3rem 1.5rem 1.5rem;
 }
 

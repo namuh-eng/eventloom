@@ -177,9 +177,9 @@ import {
 import type {
   RepositoryResult,
   SpeakerAccountWorkloadRepository,
+  SpeakerDecisionWriteFence,
   SpeakerInvitationDeliveryInput,
   SpeakerInvitationDeliveryReceipt,
-  SpeakerDecisionWriteFence,
   SpeakerOrganizerLifecycleRepository,
   SpeakerProfile,
   SpeakerReminderDelivery,
@@ -2888,7 +2888,6 @@ interface EvaluationAcceptanceSpeakerRepository extends SpeakerRepository {
   ): Promise<SpeakerProfile>;
   ensureProfileTask?(input: {
     readonly eventId: string;
-    readonly submissionId: string;
     readonly participantId: string;
     readonly updatedAt: string;
   }): Promise<SpeakerTask>;
@@ -3124,18 +3123,17 @@ export class AirtableEvaluationAcceptanceHandoff implements EvaluationAcceptance
     if (ensureProfileTask !== undefined) {
       await ensureProfileTask.call(this.#speakers, {
         eventId: input.eventId,
-        submissionId: input.submissionId,
         participantId,
         updatedAt: input.decidedAt,
       });
       return;
     }
-    const id = `speaker-task:${input.eventId}:${input.submissionId}:${participantId}:profile`;
+    const id = `speaker-task:${input.eventId}:${participantId}:profile`;
     if ((await this.#speakers.getTask(input.eventId, id)) !== null) return;
     const task: SpeakerTask = {
       id,
       eventId: input.eventId,
-      submissionId: input.submissionId,
+      subject: { type: "participant", participantId },
       participantId,
       type: "form",
       owner: "speaker",
@@ -3157,7 +3155,9 @@ export class AirtableEvaluationAcceptanceHandoff implements EvaluationAcceptance
       actorAccountId: input.decidedBy,
       ...(input.decisionFence === undefined ? {} : { decisionFence: input.decisionFence }),
     });
-    if (!created.ok) throw new Error("The accepted speaker profile task was not persisted.");
+    if (!created.ok) {
+      throw new Error(`The accepted speaker profile task was not persisted: ${created.reason}.`);
+    }
   }
 
   async #ensureCanonicalSession(
@@ -7934,20 +7934,50 @@ export class AirtableEvaluationDecisionProjection {
             updatedAt,
             ...decisionFenceValues,
           ),
-        this.database
-          .prepare(
-            `DELETE FROM communication_recipient_audiences
-              WHERE organization_id = ? AND event_id = ? AND recipient_id = ?
-                AND audience IN ('accepted_participants','waitlisted_participants','rejected_participants')
-                AND ${decisionFenceSql}`,
-          )
-          .bind(input.tenantId, input.eventId, participant.id, ...decisionFenceValues),
+        ...(["accepted", "waitlisted", "rejected"] as const).map((status) => {
+          const audience =
+            status === "accepted"
+              ? "accepted_participants"
+              : status === "waitlisted"
+                ? "waitlisted_participants"
+                : "rejected_participants";
+          return this.database
+            .prepare(
+              `DELETE FROM communication_recipient_audiences
+                WHERE organization_id = ? AND event_id = ? AND recipient_id = ? AND audience = ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM submission_participants AS participant_submission
+                    JOIN evaluation_decisions AS participant_decision
+                      ON participant_decision.organization_id = participant_submission.organization_id
+                     AND participant_decision.event_id = participant_submission.event_id
+                     AND participant_decision.submission_id = participant_submission.submission_id
+                    WHERE participant_submission.organization_id = ?
+                      AND participant_submission.event_id = ?
+                      AND participant_submission.participant_id = ?
+                      AND participant_decision.status = ?
+                  )
+                  AND ${decisionFenceSql}`,
+            )
+            .bind(
+              input.tenantId,
+              input.eventId,
+              participant.id,
+              audience,
+              input.tenantId,
+              input.eventId,
+              participant.id,
+              status,
+              ...decisionFenceValues,
+            );
+        }),
         this.database
           .prepare(
             `INSERT INTO communication_recipient_audiences
                (organization_id, event_id, recipient_id, audience)
              SELECT ?, ?, ?, ?
-             WHERE ${decisionFenceSql}`,
+             WHERE ${decisionFenceSql}
+             ON CONFLICT(organization_id, event_id, recipient_id, audience) DO NOTHING`,
           )
           .bind(
             input.tenantId,
@@ -8423,6 +8453,7 @@ export function createD1ApplicationDependencies(
     new AirtableCommunicationDeliveryAdapter(options.database, options.outboxQueue),
     { senderIdentities: options.senderAddresses },
   );
+  const sessionRepository = options.businessRepositories.sessions;
   const speakerRepository = options.businessRepositories.speaker;
   speakerRepository satisfies SpeakerRepository &
     SpeakerOrganizerLifecycleRepository &
@@ -8439,6 +8470,10 @@ export function createD1ApplicationDependencies(
     options.senderAddresses,
   );
   const speakerService = new SpeakerService(speakerRepository, privateAssets, {
+    sessionAuthority: {
+      getSession: (organizationId, eventId, sessionId) =>
+        sessionRepository.getSession(organizationId, eventId, sessionId),
+    },
     delivery: speakerDelivery,
     communications: new CommunicationSpeakerCommunications(communicationService, options.webOrigin),
     invitationCreator: options.eventRoleInvitationAdapters.speakerCreator,
@@ -8493,7 +8528,6 @@ export function createD1ApplicationDependencies(
       privateAssets,
     }),
   });
-  const sessionRepository = options.businessRepositories.sessions;
   let sessionService!: SessionService;
   const agendaRepository = options.businessRepositories.agenda;
   const agendaMutationLock = new CloudflareAgendaMutationLock(options.agendaCoordinator);
@@ -8786,18 +8820,22 @@ export function createD1ApplicationDependencies(
               : { capabilitiesByParticipant: scope.capabilitiesByParticipant }),
           };
         },
-        async listSubmissions(organizationId, eventId, submissionIds) {
-          const submissions = await speakerRepository.listSubmissionsForOrganization(
-            organizationId,
-            eventId,
-            submissionIds,
-          );
-          return submissions.map((submission) => ({
-            organizationId: submission.tenantId,
-            eventId: submission.eventId,
-            submissionId: submission.id,
-            participantIds: submission.participantIds,
-          }));
+        async listSessions(organizationId: string, eventId: string, sessionIds: readonly string[]) {
+          const requestedSessionIds = new Set(sessionIds);
+          return (await sessionRepository.listSessions(organizationId, eventId))
+            .filter(
+              (session) =>
+                session.tenantId === organizationId &&
+                session.eventId === eventId &&
+                requestedSessionIds.has(session.id),
+            )
+            .map((session) => ({
+              tenantId: session.tenantId,
+              eventId: session.eventId,
+              sessionId: session.id,
+              status: session.status,
+              speakerIds: session.speakerIds,
+            }));
         },
         async listTasks(organizationId, eventId, participantIds) {
           const tasks = await speakerRepository.listTasksForOrganization(
@@ -8809,7 +8847,7 @@ export function createD1ApplicationDependencies(
             organizationId: task.tenantId,
             eventId: task.eventId,
             taskId: task.id,
-            submissionId: task.submissionId,
+            sessionId: task.subject.type === "session" ? task.subject.sessionId : null,
             participantId: task.participantId,
             owner: task.owner,
             title: task.title,
@@ -8857,6 +8895,16 @@ export function createD1ApplicationDependencies(
           .all<{ organization_id: string }>();
         const matches = rows.results ?? [];
         return matches.length === 1 ? (matches[0]?.organization_id ?? null) : null;
+      },
+      async agendaCatalogForEvent(eventId: string) {
+        const rows = await options.database
+          .prepare("SELECT organization_id FROM events WHERE id = ? LIMIT 2")
+          .bind(eventId)
+          .all<{ organization_id: string }>();
+        const matches = rows.results ?? [];
+        const organizationId = matches.length === 1 ? matches[0]?.organization_id : undefined;
+        if (organizationId === undefined) throw new Error(`Event ${eventId} was not found.`);
+        return sessionService.getAgendaCatalog(organizationId, eventId);
       },
       async eventMetadataForEvent(eventId: string) {
         const rows = await options.database

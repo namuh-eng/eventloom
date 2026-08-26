@@ -6,7 +6,13 @@ import { Textarea } from "../../components/ui/textarea";
 import { WorkspaceFormSection, WorkspaceState } from "../../components/workspace/workspace-state";
 import { assetPointerLabels } from "./portal-assets";
 import { usePortal } from "./portal-provider";
-import { assetVersionId, commentsForAsset, type TaskAssetResolution } from "./portal-task-assets";
+import {
+  assetVersionId,
+  commentsForAsset,
+  commentsForAssetVersion,
+  commentThreadExpectedVersion,
+  type TaskAssetResolution,
+} from "./portal-task-assets";
 import styles from "./portal-task-assets.module.css";
 import { formatPortalDate, formatPortalFileSize, portalAssetStateLabel } from "./portal-ui-model";
 import type { PortalAsset, PortalTask } from "./types";
@@ -28,17 +34,27 @@ export function PortalTaskAssetView({
   const [comment, setComment] = useState("");
   const [commentPending, setCommentPending] = useState(false);
   const [downloadPending, setDownloadPending] = useState(false);
-  const loaded = useRef<string | null>(null);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const commentsRequestIdRef = useRef(0);
   const commentSubmissionIdRef = useRef(0);
   const asset =
     resolution.assets.find((candidate) => candidate.id === selectedId) ?? resolution.latest;
+  const selectedAssetId = asset?.id;
 
   useEffect(() => {
-    if (!asset || loaded.current === asset.id) return;
-    loaded.current = asset.id;
+    if (!selectedAssetId) return;
+    const requestId = commentsRequestIdRef.current + 1;
+    commentsRequestIdRef.current = requestId;
+    let active = true;
+    setCommentsLoading(true);
     clearWorkspaceError();
-    void loadAssetComments(asset.id);
-  }, [asset, clearWorkspaceError, loadAssetComments]);
+    void loadAssetComments(selectedAssetId).finally(() => {
+      if (active && requestId === commentsRequestIdRef.current) setCommentsLoading(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, [selectedAssetId, clearWorkspaceError, loadAssetComments]);
 
   if (!asset) {
     if (["missing-metadata", "conflict"].includes(resolution.status)) {
@@ -53,7 +69,11 @@ export function PortalTaskAssetView({
     return null;
   }
 
-  const comments = commentsForAsset(asset, workspace.assetComments[asset.id] ?? []);
+  const familyComments = workspace.assetComments[asset.id] ?? [];
+  const comments = commentsForAsset(asset, familyComments);
+  const expectedCommentVersion = commentThreadExpectedVersion(
+    commentsForAssetVersion(asset, familyComments),
+  );
   const version = asset.version ?? assetVersionId(asset);
 
   async function download(selected: PortalAsset) {
@@ -69,14 +89,11 @@ export function PortalTaskAssetView({
 
   async function postComment(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!asset || !comment.trim()) return;
+    if (!asset || !comment.trim() || commentsLoading) return;
     const submissionId = commentSubmissionIdRef.current + 1;
     commentSubmissionIdRef.current = submissionId;
     setCommentPending(true);
-    const expectedVersion = comments.reduce(
-      (latest, entry) => Math.max(latest, entry.version ?? 0),
-      0,
-    );
+    const expectedVersion = expectedCommentVersion;
     try {
       const succeeded = await addAssetComment({
         assetId: asset.id,
@@ -167,8 +184,12 @@ export function PortalTaskAssetView({
             {workspaceError}
           </p>
         ) : null}
-        {comments.length === 0 ? (
-          <p className={styles.muted}>No comments on this version.</p>
+        {commentsLoading ? (
+          <p className={styles.muted} role="status">
+            Loading comments…
+          </p>
+        ) : comments.length === 0 ? (
+          <p className={styles.muted}>No comments on this file version.</p>
         ) : (
           <ol>
             {comments.map((entry) => (
@@ -190,7 +211,11 @@ export function PortalTaskAssetView({
               value={comment}
               onChange={(event) => setComment(event.currentTarget.value)}
             />
-            <Button type="submit" variant="outline" disabled={commentPending || !comment.trim()}>
+            <Button
+              type="submit"
+              variant="outline"
+              disabled={commentsLoading || commentPending || !comment.trim()}
+            >
               {commentPending ? "Posting…" : "Post reply"}
             </Button>
           </form>

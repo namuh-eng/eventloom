@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { DeliverableAsset, DeliverableMatrixItem, DeliverableTask } from "./api";
 import {
+  assetMatchesTaskScope,
   exportAssetIdsForFamilies,
   fileFamilyId,
   fileFamilyPointers,
   projectFileFamilies,
+  taskSessionId,
 } from "./file-family-model";
 import { filePointerLabels } from "./file-library-model";
 
 const task: DeliverableTask = {
   id: "task-1",
   eventId: "event-1",
-  submissionId: "session-1",
+  subject: { type: "session", sessionId: "session-1" },
   participantId: "speaker-1",
   type: "upload",
   owner: "speaker",
@@ -27,7 +29,7 @@ function asset(id: string, overrides: Partial<DeliverableAsset> = {}): Deliverab
   return {
     id,
     eventId: "event-1",
-    submissionId: "session-1",
+    sessionId: "session-1",
     participantId: "speaker-1",
     taskId: task.id,
     kind: "slides",
@@ -40,6 +42,13 @@ function asset(id: string, overrides: Partial<DeliverableAsset> = {}): Deliverab
     versionFamilyId: "family-1",
     ...overrides,
   };
+}
+function unlinkedAsset(
+  id: string,
+  overrides: Omit<Partial<DeliverableAsset>, "taskId"> = {},
+): DeliverableAsset {
+  const { taskId: _taskId, ...unlinked } = asset(id, overrides);
+  return unlinked;
 }
 
 function matrixItem(
@@ -83,6 +92,52 @@ describe("file family projection", () => {
       exportAssetId: second.id,
     });
     expect(families[0]?.versions.map(({ id }) => id)).toEqual([second.id, first.id]);
+  });
+  it("uses task-first binding and session scope for unlinked assets", () => {
+    const sameTaskDifferentSession = asset("asset-other-session", {
+      sessionId: "session-2",
+      versionFamilyId: "family-1",
+    });
+    const noTaskSessionOne = unlinkedAsset("asset-no-task-session-1", {
+      versionFamilyId: "family-1",
+    });
+    const noTaskSessionTwo = unlinkedAsset("asset-no-task-session-2", {
+      sessionId: "session-2",
+      versionFamilyId: "family-1",
+    });
+    const sameTaskDifferentParticipant = asset("asset-other-participant", {
+      participantId: "speaker-2",
+      versionFamilyId: "family-1",
+    });
+
+    expect(projectFileFamilies([asset("asset-1"), sameTaskDifferentSession])).toHaveLength(1);
+    expect(projectFileFamilies([noTaskSessionOne, noTaskSessionTwo])).toHaveLength(2);
+    expect(projectFileFamilies([asset("asset-1"), sameTaskDifferentParticipant])).toHaveLength(2);
+  });
+
+  it("derives a session only from a session task subject", () => {
+    expect(taskSessionId(task)).toBe("session-1");
+    expect(
+      taskSessionId({
+        ...task,
+        subject: { type: "participant" },
+      }),
+    ).toBeUndefined();
+  });
+  it("requires matching participant and session scopes for task-linked assets", () => {
+    expect(assetMatchesTaskScope(asset("asset-1"), task)).toBe(true);
+    expect(
+      assetMatchesTaskScope(asset("asset-1"), {
+        ...task,
+        participantId: "speaker-2",
+      }),
+    ).toBe(false);
+    expect(
+      assetMatchesTaskScope(asset("asset-1"), {
+        ...task,
+        subject: { type: "session", sessionId: "session-2" },
+      }),
+    ).toBe(false);
   });
 
   it("prefers the matrix current version over newer version ordering and pointer metadata", () => {

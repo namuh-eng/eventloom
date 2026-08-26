@@ -440,6 +440,10 @@ describe("organization CRM workspace", () => {
     );
     expect(markup).not.toContain("Send Now");
     expect(markup).toContain("Queue outreach for delivery");
+    expect(markup).toContain("Recipient safeguards");
+    expect(markup).toContain("Preview confirms merge fields, not consent.");
+    expect(markup).toContain("provider suppression");
+    expect(markup).toContain("selected for queueing");
     expect(markup).toContain("Qualified speakers");
     expect(markup).toContain("Pipeline board");
     expect(markup).toContain("CRM analytics");

@@ -58,6 +58,7 @@ import {
   type DeliverableSession,
   type DeliverableSpeakerProfile,
   DeliverablesApiError,
+  type DeliverableTaskAssignment,
   type DeliverableTaskInput,
   deliverableAssetKinds,
 } from "./api";
@@ -250,7 +251,7 @@ type TaskComposerAction =
   | {
       readonly type: "set-session";
       readonly participantId: string;
-      readonly submissionId: string;
+      readonly sessionId: string;
     }
   | { readonly type: "set-form-error"; readonly value: string | null }
   | { readonly type: "reset" };
@@ -323,7 +324,7 @@ function taskComposerReducer(
         ...state,
         sessionByParticipant: {
           ...state.sessionByParticipant,
-          [action.participantId]: action.submissionId,
+          [action.participantId]: action.sessionId,
         },
       };
     case "set-form-error":
@@ -518,7 +519,7 @@ interface TaskComposerAssignmentSectionProps {
   readonly assignmentCount: number;
   readonly onSubjectTypeChange: (value: "participant" | "session") => void;
   readonly onAssigneeToggle: (participantId: string) => void;
-  readonly onSessionChange: (participantId: string, submissionId: string) => void;
+  readonly onSessionChange: (participantId: string, sessionId: string) => void;
 }
 function TaskComposerAssignmentSection({
   participants,
@@ -599,9 +600,7 @@ function TaskComposerAssignmentSection({
                           {...(sessionByParticipant[participant.id] === undefined
                             ? {}
                             : { value: sessionByParticipant[participant.id] })}
-                          onValueChange={(submissionId) =>
-                            onSessionChange(participant.id, submissionId)
-                          }
+                          onValueChange={(sessionId) => onSessionChange(participant.id, sessionId)}
                         >
                           <SelectTrigger id={`task-session-${participant.id}`}>
                             <SelectValue placeholder="Choose an accepted session" />
@@ -710,11 +709,18 @@ function TaskComposer({
         dueAt: normalizedDueAt,
         allowedMimeTypes,
         maxSizeBytes: maxSize * bytesPerMegabyte,
-        assignments: assigneeIds.map((participantId) => ({
-          participantId,
-          submissionId:
-            subjectType === "participant" ? null : (sessionByParticipant[participantId] ?? null),
-        })),
+        assignments: assigneeIds.map(
+          (participantId): DeliverableTaskAssignment =>
+            subjectType === "participant"
+              ? { participantId, subject: { type: "participant" } }
+              : {
+                  participantId,
+                  subject: {
+                    type: "session",
+                    sessionId: sessionByParticipant[participantId] ?? "",
+                  },
+                },
+        ),
         acceptedAssetKinds: [acceptedAssetKind],
       });
     } catch (reason) {
@@ -773,8 +779,8 @@ function TaskComposer({
               onAssigneeToggle={(participantId) =>
                 dispatch({ type: "toggle-assignee", participantId })
               }
-              onSessionChange={(participantId, submissionId) =>
-                dispatch({ type: "set-session", participantId, submissionId })
+              onSessionChange={(participantId, sessionId) =>
+                dispatch({ type: "set-session", participantId, sessionId })
               }
             />
             {formError !== null ? (
@@ -1145,7 +1151,10 @@ export function DeliverablesTable({
   ].sort((left, right) => left[1].localeCompare(right[1]));
   const sessions = [
     ...new Map(
-      rows.map((row) => [row.task.submissionId ?? "participant", row.sessionLabel]),
+      rows.map((row) => [
+        row.task.subject.type === "session" ? row.task.subject.sessionId : "participant",
+        row.sessionLabel,
+      ]),
     ).entries(),
   ].sort((left, right) => left[1].localeCompare(right[1]));
   const tasks = [...new Map(rows.map((row) => [row.task.id, row.task.title])).entries()].sort(

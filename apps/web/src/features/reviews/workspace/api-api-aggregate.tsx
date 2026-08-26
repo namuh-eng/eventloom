@@ -1,4 +1,5 @@
 export interface ApiAggregate {
+  readonly planId: string;
   roundId: string;
   roundRevision: number;
   rubricRevision: number;

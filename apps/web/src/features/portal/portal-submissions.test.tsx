@@ -40,6 +40,8 @@ describe("participant submission regressions", () => {
     expect(portalSubmissionActionTargets(context, draft)).toMatchObject({
       editHref: "/cfp/organizations/organization-1/events/event-one/submission",
       pointerKey: "eventloom:cfp-submission:v1:organization-1:event-1:main-cfp",
+      activePointerKey: "eventloom:cfp-active-submission:v1:organization-1:event-1:main-cfp",
+      newSubmissionIntentKey: "eventloom:cfp-new-submission:v1:organization-1:event-1:main-cfp",
     });
 
     const markup = renderToStaticMarkup(

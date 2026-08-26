@@ -1,4 +1,3 @@
-import { portalSubmissionIdsMatch } from "./model";
 import { type AssetPointerSnapshot, resolveAssetPointers } from "./portal-assets";
 import { asTaskRecord, resolveTaskSubject, taskString } from "./portal-task-model";
 import type { PortalAsset, PortalAssetComment, PortalTask } from "./types";
@@ -22,11 +21,8 @@ function assetsForTask(task: PortalTask, assets: readonly PortalAsset[]): Portal
     ) {
       return false;
     }
-    if (subject.type === "participant") return asset.submissionId == null;
-    return (
-      asset.submissionId != null &&
-      portalSubmissionIdsMatch(asset.submissionId, subject.submissionId)
-    );
+    if (subject.type === "participant") return asset.sessionId === undefined;
+    return asset.sessionId === subject.sessionId;
   });
 }
 
@@ -107,17 +103,27 @@ export function resolveTaskAsset(
 }
 
 export function commentsForAsset(
+  _asset: PortalAsset,
+  comments: readonly PortalAssetComment[],
+): PortalAssetComment[] {
+  return [...comments];
+}
+
+export function commentsForAssetVersion(
   asset: PortalAsset,
   comments: readonly PortalAssetComment[],
 ): PortalAssetComment[] {
   const versionId = assetVersionId(asset);
-  return comments.filter((comment) => {
-    if (comment.assetId !== asset.id) return false;
-    const commentVersionId = taskString(asTaskRecord(comment)?.versionId);
-    return (
-      commentVersionId === null || commentVersionId === asset.id || commentVersionId === versionId
-    );
-  });
+  return comments.filter(
+    (comment) => comment.assetId === asset.id && comment.versionId === versionId,
+  );
+}
+
+export function commentThreadExpectedVersion(comments: readonly PortalAssetComment[]): number {
+  return comments.reduce(
+    (expectedVersion, comment) => Math.max(expectedVersion, comment.version ?? 0),
+    0,
+  );
 }
 
 export function mergePortalAssets(

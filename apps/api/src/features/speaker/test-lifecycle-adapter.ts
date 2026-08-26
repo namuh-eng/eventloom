@@ -69,6 +69,7 @@ export function withTestSpeakerOrganizerLifecycle<T extends SpeakerRepository>(
           resources.assets === true
             ? (store.assets ?? []).filter((asset) => asset.eventId === eventId)
             : [],
+        canonicalSessions: [],
       };
     },
     resolveEventParticipant(input) {

@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { OrganizerEventWorkspaceProvider } from "@/features/admin/organizer-event-workspace";
 import { createNavigationDataCache } from "@/lib/navigation-data-cache";
 import type { SessionRecord, SessionsApi } from "./api";
-import { SessionsWorkspaceView } from "./session-workspace";
+import { SessionsWorkspaceView, sessionContentDraftIsDirty } from "./session-workspace";
 import {
+  loadSessionFormats,
   loadSessionsWorkspaceBundle,
+  loadSessionTracks,
   type SessionsWorkspaceCacheBundle,
   sessionsWorkspaceCacheKey,
   sessionsWorkspaceCacheTags,
@@ -20,6 +22,8 @@ const session: SessionRecord = {
   status: "Accepted",
   contentStatus: "Needs changes" as const,
   durationMinutes: 45,
+  trackIds: ["track-1"],
+  formatId: "format-1",
   speakerIds: ["speaker-1"],
   speakerRoster: [{ id: "speaker-1", displayName: "Avery Kim", role: "primary" }],
   version: 2,
@@ -28,6 +32,8 @@ const session: SessionRecord = {
   updatedBy: "organizer-1",
 };
 const speakers = [{ id: "speaker-1", displayName: "Avery Kim" }] as const;
+const tracks = [{ id: "track-1", name: "Platform" }] as const;
+const formats = [{ id: "format-1", name: "Talk" }] as const;
 
 function ordinaryVisibleText(markup: string): string {
   return markup
@@ -42,6 +48,8 @@ function sessionsApi(): SessionsApi {
     list: vi.fn(async () => [session]),
     get: vi.fn(async () => session),
     updateContent: vi.fn(async () => session),
+    listTracks: vi.fn(async () => [{ id: "track-1", name: "Platform" }]),
+    listFormats: vi.fn(async () => [{ id: "format-1", name: "Talk" }]),
     listSpeakers: vi.fn(async () => speakers),
     updateSpeakers: vi.fn(async () => session),
     listHistory: vi.fn(async () => []),
@@ -137,7 +145,7 @@ describe("sessions workspace presentation", () => {
           },
           { id: "speaker-2", displayName: "Morgan Lee" },
         ],
-        onSave: async () => undefined,
+        onSave: async () => true,
         onSaveSpeakers: async () => undefined,
         onSetContentStatus: async () => undefined,
         onRestore: async () => undefined,
@@ -267,6 +275,63 @@ describe("sessions workspace presentation", () => {
     expect(unavailableMarkup).toContain("Retry speaker roster");
     expect(unavailableMarkup).not.toContain("No speakers are available in this event roster.");
   });
+  it("isolates taxonomy failures, preserves canonical values, and offers affected retries", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SessionsWorkspaceView, {
+        organizationId: "org-1",
+        eventId: "event-1",
+        sessions: [session],
+        selectedSessionId: session.id,
+        history: [],
+        tracks,
+        formats,
+        trackError: "Track service unavailable.",
+        onRetryTracks: () => undefined,
+        onSave: async () => true,
+      }),
+    );
+
+    expect(markup).toContain("Session tracks unavailable");
+    expect(markup).toContain("Current track assignments are preserved");
+    expect(markup).toContain("Retry tracks");
+    expect(markup).not.toContain("Session formats unavailable");
+    expect(markup).toContain('id="session-format-session-1"');
+    expect(markup).toContain('id="session-track-session-1-track-1"');
+    expect(markup).toContain('disabled=""');
+  });
+  it("marks unsaved or rebased content drafts dirty before approval", () => {
+    expect(
+      sessionContentDraftIsDirty(session, {
+        title: "Revised worker pools",
+        description: session.description,
+        trackIds: session.trackIds,
+        formatId: session.formatId ?? "",
+        durationMinutes: session.durationMinutes,
+        baseVersion: session.version,
+      }),
+    ).toBe(true);
+    expect(
+      sessionContentDraftIsDirty(session, {
+        title: session.title,
+        description: session.description,
+        trackIds: session.trackIds,
+        formatId: session.formatId ?? "",
+        durationMinutes: session.durationMinutes,
+        baseVersion: session.version - 1,
+      }),
+    ).toBe(true);
+    const saved = { ...session, title: "Revised worker pools", version: session.version + 1 };
+    expect(
+      sessionContentDraftIsDirty(saved, {
+        title: saved.title,
+        description: saved.description,
+        trackIds: saved.trackIds,
+        formatId: saved.formatId ?? "",
+        durationMinutes: saved.durationMinutes,
+        baseVersion: saved.version,
+      }),
+    ).toBe(false);
+  });
 });
 describe("sessions workspace navigation cache", () => {
   it("isolates normalized organization and canonical event scopes", () => {
@@ -291,6 +356,10 @@ describe("sessions workspace navigation cache", () => {
     await expect(loadSessionsWorkspaceBundle(api, cache, key, tags)).resolves.toEqual({
       sessions: [session],
       speakers,
+      tracks,
+      formats,
+      trackError: null,
+      formatError: null,
     });
     expect(api.list).toHaveBeenCalledTimes(1);
     expect(api.listSpeakers).toHaveBeenCalledTimes(1);
@@ -306,9 +375,20 @@ describe("sessions workspace navigation cache", () => {
     await expect(loadSessionsWorkspaceBundle(api, cache, key, tags)).resolves.toEqual({
       sessions: [session],
       speakers,
+      tracks,
+      formats,
+      trackError: null,
+      formatError: null,
     });
 
-    expect(cache.peek(key)).toEqual({ sessions: [session], speakers });
+    expect(cache.peek(key)).toEqual({
+      sessions: [session],
+      speakers,
+      tracks,
+      formats,
+      trackError: null,
+      formatError: null,
+    });
     expect(api.list).toHaveBeenCalledTimes(1);
     expect(api.listSpeakers).toHaveBeenCalledTimes(1);
   });
@@ -324,6 +404,58 @@ describe("sessions workspace navigation cache", () => {
 
     expect(api.list).toHaveBeenCalledTimes(2);
     expect(api.listSpeakers).toHaveBeenCalledTimes(2);
+  });
+  it("isolates taxonomy failures, preserves prior values, and recovers on retry", async () => {
+    const api = sessionsApi();
+    const cache = createNavigationDataCache();
+    const key = sessionsWorkspaceCacheKey("org-1", "event-1");
+    const tags = sessionsWorkspaceCacheTags("org-1", "event-1");
+
+    await loadSessionsWorkspaceBundle(api, cache, key, tags);
+    vi.mocked(api.listTracks).mockRejectedValueOnce(new Error("Tracks are unavailable."));
+    vi.mocked(api.listFormats).mockResolvedValueOnce([{ id: "format-2", name: "Workshop" }]);
+
+    await expect(
+      loadSessionsWorkspaceBundle(api, cache, key, tags, undefined, true),
+    ).resolves.toEqual({
+      sessions: [session],
+      speakers,
+      tracks,
+      formats: [{ id: "format-2", name: "Workshop" }],
+      trackError: "Tracks are unavailable.",
+      formatError: null,
+    });
+
+    vi.mocked(api.listTracks).mockResolvedValueOnce([{ id: "track-2", name: "Operations" }]);
+    await expect(
+      loadSessionsWorkspaceBundle(api, cache, key, tags, undefined, true),
+    ).resolves.toEqual({
+      sessions: [session],
+      speakers,
+      tracks: [{ id: "track-2", name: "Operations" }],
+      formats: [{ id: "format-1", name: "Talk" }],
+      trackError: null,
+      formatError: null,
+    });
+  });
+  it("retries only the requested taxonomy when another workspace endpoint rejects", async () => {
+    const api = sessionsApi();
+    vi.mocked(api.list).mockRejectedValue(new Error("Sessions are unavailable."));
+    vi.mocked(api.listTracks).mockResolvedValueOnce([{ id: "track-2", name: "Operations" }]);
+    vi.mocked(api.listFormats).mockRejectedValueOnce(new Error("Formats are unavailable."));
+
+    await expect(loadSessionTracks(api)).resolves.toEqual({
+      options: [{ id: "track-2", name: "Operations" }],
+      error: null,
+    });
+    await expect(loadSessionFormats(api)).resolves.toEqual({
+      options: [],
+      error: "Formats are unavailable.",
+    });
+    expect(api.list).not.toHaveBeenCalled();
+    expect(api.listSpeakers).not.toHaveBeenCalled();
+    expect(api.listTracks).toHaveBeenCalledTimes(1);
+    expect(api.listFormats).toHaveBeenCalledTimes(1);
   });
 
   it("fences pending reads when event and sessions mutations invalidate the scope", async () => {
@@ -341,8 +473,16 @@ describe("sessions workspace navigation cache", () => {
     });
 
     cache.invalidate(["event:event-1", "sessions:event-1"]);
-    resolveLoad({ sessions: [session], speakers });
-    await expect(pending).resolves.toEqual({ sessions: [session], speakers });
+    const bundle = {
+      sessions: [session],
+      speakers,
+      tracks: [{ id: "track-1", name: "Platform" }],
+      formats: [{ id: "format-1", name: "Talk" }],
+      trackError: null,
+      formatError: null,
+    } as const;
+    resolveLoad(bundle);
+    await expect(pending).resolves.toEqual(bundle);
     expect(cache.peek(key)).toBeUndefined();
   });
 });

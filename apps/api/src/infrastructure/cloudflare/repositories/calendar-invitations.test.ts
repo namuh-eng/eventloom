@@ -188,6 +188,7 @@ function agendaState(): AgendaState {
         id: "session-1",
         title: "Durable calendars",
         status: "Accepted",
+        publicApprovalEligible: true,
         participantIds: ["speaker-1"],
         resourceIds: [],
         capacityRequired: 0,

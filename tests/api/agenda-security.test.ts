@@ -33,6 +33,7 @@ const catalog = {
       id: "session-a",
       title: "Session A",
       status: "accepted" as const,
+      publicApprovalEligible: true,
       participantIds: ["participant-shared"],
       resourceIds: [],
       capacityRequired: 10,
@@ -41,6 +42,7 @@ const catalog = {
       id: "session-b",
       title: "Session B",
       status: "accepted" as const,
+      publicApprovalEligible: true,
       participantIds: ["participant-shared"],
       resourceIds: [],
       capacityRequired: 10,
@@ -130,6 +132,8 @@ function fixture() {
     agenda: {
       engine,
       organizationIdForEvent: async (eventId) => (eventId === "event-1" ? "org-1" : null),
+      agendaCatalogForEvent: async (eventId) =>
+        eventId === "event-1" ? catalog : { sessions: [], rooms: [], tracks: [] },
       calendarUidDomain: "calendar.example.test",
     },
   });
@@ -142,7 +146,7 @@ async function createAgenda(app: ReturnType<typeof fixture>["app"]) {
     {
       method: "POST",
       headers: { ...ownerHeaders, "content-type": "application/json" },
-      body: JSON.stringify(catalog),
+      body: JSON.stringify({ minimumTravelMinutes: catalog.minimumTravelMinutes }),
     },
     environment,
   );

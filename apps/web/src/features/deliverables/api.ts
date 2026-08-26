@@ -25,17 +25,15 @@ export const deliverableAssetKinds = ["headshot", "slides", "supporting_file"] a
 export type DeliverableAssetState = "pending_upload" | "ready" | "rejected";
 export type DeliverableReviewState = "approved" | "needs_changes";
 export type DeliverableTaskSubject =
-  | { readonly type: "participant"; readonly participantId: string }
-  | {
-      readonly type: "session";
-      readonly participantId: string;
-      readonly submissionId: string;
-    };
+  | { readonly type: "participant" }
+  | { readonly type: "session"; readonly sessionId: string };
 
-export interface DeliverableTaskAssignment {
-  readonly participantId: string;
-  readonly submissionId: string | null;
-}
+export type DeliverableTaskAssignment =
+  | { readonly participantId: string; readonly subject: { readonly type: "participant" } }
+  | {
+      readonly participantId: string;
+      readonly subject: { readonly type: "session"; readonly sessionId: string };
+    };
 
 export interface DeliverableSessionHistoryEntry {
   readonly id: string;
@@ -72,9 +70,8 @@ export interface DeliverableSession {
 export interface DeliverableTask {
   readonly id: string;
   readonly eventId: string;
-  readonly submissionId: string | null;
   readonly participantId: string;
-  readonly subject?: DeliverableTaskSubject;
+  readonly subject: DeliverableTaskSubject;
   readonly participantName?: string;
   readonly sessionTitle?: string;
   readonly type: DeliverableTaskType;
@@ -143,7 +140,7 @@ export type DeliverablesMatrix = DeliverableTaskMatrix;
 export interface DeliverableAsset {
   readonly id: string;
   readonly eventId: string;
-  readonly submissionId?: string;
+  readonly sessionId?: string;
   readonly sessionTitle?: string;
   readonly participantName?: string;
   readonly uploaderLabel?: string;
@@ -314,7 +311,6 @@ export interface DeliverableTaskInput {
 }
 export interface DeliverableHeadshotReplacementInput {
   readonly participantId: string;
-  readonly submissionId: string;
   readonly file: File;
   readonly expectedVersion: number;
   readonly supersedesAssetId?: string;
@@ -505,7 +501,7 @@ function publicAsset(value: unknown): DeliverableAsset {
     sizeBytes: typeof candidate.sizeBytes === "number" ? candidate.sizeBytes : 0,
     state: candidate.state as DeliverableAssetState,
     createdAt: typeof candidate.createdAt === "string" ? candidate.createdAt : "",
-    ...(typeof candidate.submissionId === "string" ? { submissionId: candidate.submissionId } : {}),
+    ...(typeof candidate.sessionId === "string" ? { sessionId: candidate.sessionId } : {}),
     ...(typeof candidate.sessionTitle === "string" ? { sessionTitle: candidate.sessionTitle } : {}),
     ...(typeof candidate.participantName === "string"
       ? { participantName: candidate.participantName }
@@ -773,42 +769,19 @@ function normalizedTaskMaxBytes(value: unknown, required: boolean): number | und
   return value;
 }
 
-function normalizedTaskSubject(
-  value: unknown,
-  participantId: string,
-  submissionId: string | null,
-): DeliverableTaskSubject {
-  if (value === undefined) throw invalidTaskResponse("The task subject is missing.");
+function normalizedTaskSubject(value: unknown): DeliverableTaskSubject {
   if (!isRecord(value) || typeof value.type !== "string") {
     throw invalidTaskResponse("The task subject is invalid.");
   }
   if (value.type === "participant") {
-    if (
-      typeof value.participantId !== "string" ||
-      value.participantId.trim().length === 0 ||
-      value.participantId !== participantId ||
-      submissionId !== null
-    ) {
-      throw invalidTaskResponse("The participant task subject is invalid.");
-    }
-    return { type: "participant", participantId: value.participantId };
+    return { type: "participant" };
   }
-  if (
-    value.type !== "session" ||
-    typeof value.participantId !== "string" ||
-    value.participantId.trim().length === 0 ||
-    value.participantId !== participantId ||
-    typeof value.submissionId !== "string" ||
-    value.submissionId.trim().length === 0 ||
-    submissionId !== value.submissionId
-  ) {
+  const sessionId =
+    value.type === "session" && typeof value.sessionId === "string" ? value.sessionId.trim() : "";
+  if (sessionId.length === 0) {
     throw invalidTaskResponse("The session task subject is invalid.");
   }
-  return {
-    type: "session",
-    participantId: value.participantId,
-    submissionId: value.submissionId,
-  };
+  return { type: "session", sessionId };
 }
 
 function normalizeTask(value: unknown): DeliverableTask {
@@ -822,18 +795,7 @@ function normalizeTask(value: unknown): DeliverableTask {
     typeof value.participantId === "string" && value.participantId.trim().length > 0
       ? value.participantId
       : undefined;
-  const submissionId =
-    typeof value.submissionId === "string"
-      ? value.submissionId
-      : value.submissionId === null
-        ? null
-        : undefined;
-  if (
-    id === undefined ||
-    eventId === undefined ||
-    participantId === undefined ||
-    submissionId === undefined
-  ) {
+  if (id === undefined || eventId === undefined || participantId === undefined) {
     throw invalidTaskResponse("The task identity or subject assignment was invalid.");
   }
   if (typeof value.type !== "string" || !taskTypeSet.has(value.type as DeliverableTaskType)) {
@@ -872,7 +834,7 @@ function normalizeTask(value: unknown): DeliverableTask {
   const type = value.type as DeliverableTaskType;
   const allowedMimeTypes = normalizedTaskMimeTypes(value.allowedMimeTypes, type === "upload");
   const maxBytes = normalizedTaskMaxBytes(value.maxBytes, type === "upload");
-  const subject = normalizedTaskSubject(value.subject, participantId, submissionId);
+  const subject = normalizedTaskSubject(value.subject);
   const acceptedAssetKinds =
     value.acceptedAssetKinds === undefined
       ? undefined
@@ -887,7 +849,6 @@ function normalizeTask(value: unknown): DeliverableTask {
   return {
     id,
     eventId,
-    submissionId,
     participantId,
     subject,
     ...(typeof value.participantName === "string"
@@ -915,27 +876,33 @@ function normalizedTaskAssignments(value: unknown): readonly DeliverableTaskAssi
   if (!Array.isArray(value) || value.length === 0 || value.length > 500) {
     throw new TypeError("At least one task assignment is required.");
   }
-  const assignments = value.map((candidate) => {
+  const assignments = value.map((candidate): DeliverableTaskAssignment => {
     if (!isRecord(candidate) || typeof candidate.participantId !== "string") {
       throw new TypeError("Task assignments require a participant subject.");
     }
     const participantId = candidate.participantId.trim();
-    if (participantId.length === 0) {
-      throw new TypeError("Task assignments require a participant subject.");
-    }
-    const submissionId =
-      candidate.submissionId === null
-        ? null
-        : typeof candidate.submissionId === "string" && candidate.submissionId.trim().length > 0
-          ? candidate.submissionId.trim()
-          : undefined;
-    if (submissionId === undefined) {
+    if (participantId.length === 0 || !isRecord(candidate.subject)) {
       throw new TypeError("Task assignments require a participant or session subject.");
     }
-    return { participantId, submissionId };
+    if (candidate.subject.type === "participant") {
+      return { participantId, subject: { type: "participant" } };
+    }
+    if (
+      candidate.subject.type !== "session" ||
+      typeof candidate.subject.sessionId !== "string" ||
+      candidate.subject.sessionId.trim().length === 0
+    ) {
+      throw new TypeError("Task assignments require a participant or session subject.");
+    }
+    return {
+      participantId,
+      subject: { type: "session", sessionId: candidate.subject.sessionId.trim() },
+    };
   });
-  const keys = assignments.map(
-    (assignment) => `${assignment.participantId}\u0000${assignment.submissionId ?? ""}`,
+  const keys = assignments.map((assignment) =>
+    assignment.subject.type === "participant"
+      ? `${assignment.participantId}\u0000participant`
+      : `${assignment.participantId}\u0000session\u0000${assignment.subject.sessionId}`,
   );
   if (new Set(keys).size !== keys.length) {
     throw new TypeError("Task assignments must contain unique participant and session subjects.");
@@ -1550,7 +1517,6 @@ export function createDeliverablesApi(
           [
             "headshot-replacement",
             input.participantId,
-            input.submissionId ?? "",
             input.supersedesAssetId,
             expectedLatestVersion ?? "",
             input.file.name,
@@ -1569,7 +1535,6 @@ export function createDeliverablesApi(
           headers: idempotencyKey === undefined ? {} : { "idempotency-key": idempotencyKey },
           body: JSON.stringify({
             participantId: input.participantId,
-            submissionId: input.submissionId,
             kind: "headshot",
             fileName: input.file.name,
             contentType,
@@ -1722,7 +1687,7 @@ export function createDeliverablesApi(
         signal === undefined ? {} : { signal },
       );
       return responseCollection<DeliverableComment>(body, "comments").map((value) =>
-        normalizeComment(value, assetId),
+        normalizeComment(value),
       );
     },
     addAssetComment(input) {

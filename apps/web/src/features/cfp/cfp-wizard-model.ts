@@ -4,7 +4,10 @@ import type {
   CfpPublishedForm,
   CfpServerSubmission,
 } from "./api";
-import { getCfpSubmissionPointerStorageKey } from "./draft-persistence";
+import {
+  getCfpActiveSubmissionStorageKey,
+  getCfpSubmissionPointerStorageKey,
+} from "./draft-persistence";
 import type { CfpDraft, CfpStep } from "./types";
 
 export type DynamicAnswers = Record<string, unknown>;
@@ -45,15 +48,24 @@ export function canResumeCfpSubmission(
 export function rotateCfpCompletionIdentity(
   identity: { organizationId: string; eventId: string; formId: string },
   submissionId: string,
-  localStorage: Pick<Storage, "removeItem">,
-  sessionStorage: Pick<Storage, "setItem">,
+  localStorage: Pick<Storage, "getItem" | "removeItem">,
+  sessionStorage: Pick<Storage, "removeItem" | "setItem">,
 ): void {
-  localStorage.removeItem(
-    getCfpSubmissionPointerStorageKey(identity.organizationId, identity.eventId, identity.formId),
+  const normalizedSubmissionId = submissionId.trim();
+  const pointerKey = getCfpSubmissionPointerStorageKey(
+    identity.organizationId,
+    identity.eventId,
+    identity.formId,
+  );
+  if (localStorage.getItem(pointerKey) === normalizedSubmissionId) {
+    localStorage.removeItem(pointerKey);
+  }
+  sessionStorage.removeItem(
+    getCfpActiveSubmissionStorageKey(identity.organizationId, identity.eventId, identity.formId),
   );
   sessionStorage.setItem(
     getCfpCompletionHandoffStorageKey(identity.organizationId, identity.eventId, identity.formId),
-    submissionId.trim(),
+    normalizedSubmissionId,
   );
 }
 

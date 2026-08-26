@@ -11,6 +11,8 @@ export interface AgendaSession {
   id: string;
   title: string;
   status: string;
+  /** Whether this private catalog session's content may appear in a public agenda revision. */
+  publicApprovalEligible: boolean;
   participantIds: readonly string[];
   resourceIds: readonly string[];
   capacityRequired: number;

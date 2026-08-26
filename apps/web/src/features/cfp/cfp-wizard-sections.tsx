@@ -389,6 +389,7 @@ interface CfpWizardSectionsProps {
   staleFormConflict: { submissionId: string | null; pinnedDraftUnavailable: boolean } | null;
   submissionsClosed: boolean;
   saveError: string | null;
+  pinnedDraftAuthenticationRequired: boolean;
   saveState: "idle" | "saving" | "saved" | "error";
   mutationPending: boolean;
   formRef: React.MutableRefObject<HTMLFormElement | null>;
@@ -420,6 +421,7 @@ interface CfpWizardSectionsProps {
   onSaveNow: () => void;
   onRefreshPinnedDraft: () => void;
   onDiscardStaleDraft: () => void;
+  onSwitchPinnedDraftAccount: () => void;
 }
 
 export function PublicCfpShell({
@@ -2020,7 +2022,14 @@ export function CfpWizardSections({
   onSaveNow,
   onRefreshPinnedDraft,
   onDiscardStaleDraft,
+  pinnedDraftAuthenticationRequired,
+  onSwitchPinnedDraftAccount,
 }: CfpWizardSectionsProps) {
+  const accountHref = getCfpStepRoute(
+    identity?.organizationId ?? published.organization.id,
+    eventSlug,
+    "account",
+  );
   return (
     <PublicCfpShell
       organization={published.organization}
@@ -2074,7 +2083,11 @@ export function CfpWizardSections({
           {saveError ?? "The published CFP could not be loaded. Refresh to try again."}
         </p>
       ) : null}
-      <form ref={formRef} noValidate onSubmit={(event) => onSubmit(event)}>
+      <form
+        ref={formRef}
+        noValidate
+        onSubmit={step === "welcome" ? undefined : (event) => onSubmit(event)}
+      >
         {step === "welcome" ? (
           <WelcomeStep
             {...(published === null ? {} : { event: published.event, form: published.form })}
@@ -2168,34 +2181,39 @@ export function CfpWizardSections({
               </Button>
             ) : null}
             {!submissionsClosed && verificationState === null ? (
-              <Button
-                className={styles.primaryButton}
-                disabled={
-                  mutationPending ||
-                  (step === "account" &&
-                    requiresApplicantContextConfirmation &&
-                    !confirmedApplicantContext)
-                }
-                type="submit"
-              >
-                {step === "welcome" ? "Continue →" : null}
-                {step === "account"
-                  ? mutationPending
-                    ? authenticatedSession
-                      ? "Continuing…"
-                      : accountMode === "sign_in"
-                        ? "Signing in…"
-                        : "Creating account…"
-                    : authenticatedSession
-                      ? "Continue to proposal"
-                      : accountMode === "sign_in"
-                        ? "Sign in and continue"
-                        : "Create account and continue"
-                  : null}
-                {step === "submission" ? "Next step →" : null}
-                {step === "participants" ? "Continue to review →" : null}
-                {step === "review" ? "Submit" : null}
-              </Button>
+              step === "welcome" ? (
+                <Button asChild className={styles.primaryButton}>
+                  <Link href={accountHref}>Continue →</Link>
+                </Button>
+              ) : (
+                <Button
+                  className={styles.primaryButton}
+                  disabled={
+                    mutationPending ||
+                    (step === "account" &&
+                      requiresApplicantContextConfirmation &&
+                      !confirmedApplicantContext)
+                  }
+                  type="submit"
+                >
+                  {step === "account"
+                    ? mutationPending
+                      ? authenticatedSession
+                        ? "Continuing…"
+                        : accountMode === "sign_in"
+                          ? "Signing in…"
+                          : "Creating account…"
+                      : authenticatedSession
+                        ? "Continue to proposal"
+                        : accountMode === "sign_in"
+                          ? "Sign in and continue"
+                          : "Create account and continue"
+                    : null}
+                  {step === "submission" ? "Next step →" : null}
+                  {step === "participants" ? "Continue to review →" : null}
+                  {step === "review" ? "Submit" : null}
+                </Button>
+              )
             ) : null}
           </div>
         </div>
@@ -2213,16 +2231,25 @@ export function CfpWizardSections({
                 : null}
         </div>
       ) : null}
-      <p
-        aria-live="polite"
-        className={saveState === "error" ? styles.saveError : styles.saveStatus}
-      >
-        {saveState === "saving" ? "Saving draft…" : null}
-        {saveState === "saved" ? "Draft saved" : null}
-        {saveState === "error" && staleFormConflict === null
-          ? (saveError ?? "Draft could not be saved. Check your connection and try again.")
-          : null}
-      </p>
+      {step !== "welcome" ? (
+        <>
+          <p
+            aria-live="polite"
+            className={saveState === "error" ? styles.saveError : styles.saveStatus}
+          >
+            {saveState === "saving" ? "Saving draft…" : null}
+            {saveState === "saved" ? "Draft saved" : null}
+            {saveState === "error" && staleFormConflict === null
+              ? (saveError ?? "Draft could not be saved. Check your connection and try again.")
+              : null}
+          </p>
+          {pinnedDraftAuthenticationRequired ? (
+            <Button onClick={onSwitchPinnedDraftAccount} type="button" variant="secondary">
+              Sign out and switch account
+            </Button>
+          ) : null}
+        </>
+      ) : null}
     </PublicCfpShell>
   );
 }

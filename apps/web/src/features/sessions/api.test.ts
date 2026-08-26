@@ -9,6 +9,8 @@ const session = {
   status: "Accepted",
   contentStatus: "Needs changes" as const,
   durationMinutes: 45,
+  trackIds: ["track-1"],
+  formatId: "format-1",
   speakerIds: ["speaker-1"],
   speakerRoster: [{ id: "speaker-1", displayName: "Avery Kim", role: "primary" }],
   version: 1,
@@ -20,7 +22,14 @@ const session = {
 describe("sessions API adapter", () => {
   it("uses canonical credentialed session and speaker endpoints for content and assignments", async () => {
     const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
-    const updated = { ...session, title: "Reliable worker pools, revised", version: 2 };
+    const updated = {
+      ...session,
+      title: "Reliable worker pools, revised",
+      trackIds: ["track-1", "track-2"],
+      formatId: "format-2",
+      durationMinutes: 40,
+      version: 2,
+    };
     const reassigned = {
       ...session,
       speakerIds: ["speaker-1", "speaker-2"],
@@ -37,6 +46,22 @@ describe("sessions API adapter", () => {
         calls.push({ input, ...(init === undefined ? {} : { init }) });
         const path = String(input);
 
+        if (path.endsWith("/sessions/tracks")) {
+          return Response.json({
+            data: [
+              { id: "track-1", eventId: "event/1", name: "Engineering" },
+              { id: "track-2", eventId: "event/1", name: "Operations" },
+            ],
+          });
+        }
+        if (path.endsWith("/sessions/formats")) {
+          return Response.json({
+            data: [
+              { id: "format-1", eventId: "event/1", name: "Workshop" },
+              { id: "format-2", eventId: "event/1", name: "Talk" },
+            ],
+          });
+        }
         if (path.endsWith("/speakers")) {
           return Response.json({
             data: {
@@ -85,8 +110,19 @@ describe("sessions API adapter", () => {
         expectedVersion: 1,
         title: updated.title,
         description: updated.description,
+        trackIds: updated.trackIds,
+        formatId: updated.formatId,
+        durationMinutes: updated.durationMinutes,
       }),
     ).resolves.toEqual(updated);
+    await expect(api.listTracks()).resolves.toEqual([
+      { id: "track-1", name: "Engineering" },
+      { id: "track-2", name: "Operations" },
+    ]);
+    await expect(api.listFormats()).resolves.toEqual([
+      { id: "format-1", name: "Workshop" },
+      { id: "format-2", name: "Talk" },
+    ]);
     await expect(api.listSpeakers()).resolves.toEqual([
       {
         id: "speaker-1",
@@ -101,6 +137,10 @@ describe("sessions API adapter", () => {
         sessionId: session.id,
         expectedVersion: 1,
         speakerIds: ["speaker-1", "speaker-2"],
+        speakerRoster: [
+          { id: "speaker-1", displayName: "Avery Kim", role: "primary" },
+          { id: "speaker-2", displayName: "Morgan Lee" },
+        ],
       }),
     ).resolves.toEqual(reassigned);
     await expect(api.listHistory(session.id)).resolves.toEqual([
@@ -121,6 +161,8 @@ describe("sessions API adapter", () => {
     expect(calls.map((call) => String(call.input))).toEqual([
       "https://api.example.test/api/admin/organizations/org%2F1/events/event%2F1/sessions",
       "https://api.example.test/api/admin/organizations/org%2F1/events/event%2F1/sessions/session%2F1",
+      "https://api.example.test/api/admin/organizations/org%2F1/events/event%2F1/sessions/tracks",
+      "https://api.example.test/api/admin/organizations/org%2F1/events/event%2F1/sessions/formats",
       "https://api.example.test/api/admin/organizations/org%2F1/events/event%2F1/speakers",
       "https://api.example.test/api/admin/organizations/org%2F1/events/event%2F1/sessions/session%2F1",
       "https://api.example.test/api/admin/organizations/org%2F1/events/event%2F1/sessions/session%2F1/history",
@@ -132,15 +174,22 @@ describe("sessions API adapter", () => {
       expectedVersion: 1,
       title: updated.title,
       description: updated.description,
+      trackIds: updated.trackIds,
+      formatId: updated.formatId,
+      durationMinutes: updated.durationMinutes,
     });
-    expect(calls[2]?.init).toMatchObject({ credentials: "include", cache: "no-store" });
-    expect(calls[3]?.init).toMatchObject({ method: "PATCH", credentials: "include" });
-    expect(JSON.parse(String(calls[3]?.init?.body))).toEqual({
+    expect(calls[4]?.init).toMatchObject({ credentials: "include", cache: "no-store" });
+    expect(calls[5]?.init).toMatchObject({ method: "PATCH", credentials: "include" });
+    expect(JSON.parse(String(calls[5]?.init?.body))).toEqual({
       expectedVersion: 1,
       speakerIds: ["speaker-1", "speaker-2"],
+      speakerRoster: [
+        { id: "speaker-1", displayName: "Avery Kim", role: "primary" },
+        { id: "speaker-2", displayName: "Morgan Lee" },
+      ],
     });
-    expect(calls[5]?.init).toMatchObject({ method: "POST", credentials: "include" });
-    expect(JSON.parse(String(calls[5]?.init?.body))).toEqual({ version: 1, expectedVersion: 2 });
+    expect(calls[7]?.init).toMatchObject({ method: "POST", credentials: "include" });
+    expect(JSON.parse(String(calls[7]?.init?.body))).toEqual({ version: 1, expectedVersion: 2 });
   });
 
   it("rejects malformed canonical session assignments and cross-event speaker rosters", async () => {
@@ -158,7 +207,32 @@ describe("sessions API adapter", () => {
       "does not match the requested event",
     );
   });
+  it.each([0, 1.5, 1_441, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects malformed canonical session duration %p",
+    async (durationMinutes) => {
+      const api = createSessionsApi("", "org-1", "event-1", async () =>
+        Response.json({ data: [{ ...session, eventId: "event-1", durationMinutes }] }),
+      );
 
+      await expect(api.list()).rejects.toThrow("does not match the requested event");
+    },
+  );
+
+  it("rejects malformed and cross-event session taxonomy resources", async () => {
+    const crossEventTracksApi = createSessionsApi("", "org-1", "event-1", async () =>
+      Response.json({ data: [{ id: "track-1", eventId: "event-2", name: "Engineering" }] }),
+    );
+    await expect(crossEventTracksApi.listTracks()).rejects.toThrow(
+      "does not match the requested event",
+    );
+
+    const malformedFormatsApi = createSessionsApi("", "org-1", "event-1", async () =>
+      Response.json({ data: [{ id: "format-1", eventId: "event-1", name: " " }] }),
+    );
+    await expect(malformedFormatsApi.listFormats()).rejects.toThrow(
+      "does not match the requested event",
+    );
+  });
   it("preserves canonical version conflicts", async () => {
     const api = createSessionsApi("", "org-1", "event-1", async () =>
       Response.json(
@@ -178,6 +252,7 @@ describe("sessions API adapter", () => {
         sessionId: "session-1",
         expectedVersion: 2,
         speakerIds: ["speaker-1"],
+        speakerRoster: [{ id: "speaker-1", displayName: "Avery Kim", role: "primary" }],
       }),
     ).rejects.toMatchObject(
       new SessionsApiError("CONFLICT", "The session has changed.", 409, "trace-1"),

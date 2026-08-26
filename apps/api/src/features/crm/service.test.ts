@@ -11,6 +11,7 @@ import type {
   CrmActor,
   CrmContact,
   CrmContactTransitionAudit,
+  CrmEventProjection,
   UpdateCrmPipelineInput,
 } from "./types";
 
@@ -74,6 +75,15 @@ class FailPrimaryMergeRepository extends InMemoryCrmRepository {
     return super.saveContact(contact, expectedVersion);
   }
 }
+class ResolvingCrmRepository extends InMemoryCrmRepository {
+  override async saveProjection(
+    projection: CrmEventProjection,
+    contact: CrmContact,
+  ): Promise<CrmEventProjection> {
+    return super.saveProjection({ ...projection, participantId: "canonical-participant" }, contact);
+  }
+}
+
 type CountedCrmRead =
   | "listContacts"
   | "listProjections"
@@ -1267,6 +1277,7 @@ describe("CrmService", () => {
     repository.resetReads();
     const created = await crm.addContactToEvent(actor, input);
     expect(created).toMatchObject({ outcome: "created", idempotent: false });
+    expect(created.projection.participantId).toBe(`crm-participant:event-a:${contact.id}`);
     expect(repository.calls).toEqual({
       listContacts: 0,
       listProjections: 0,
@@ -1308,6 +1319,33 @@ describe("CrmService", () => {
     });
     expect(await repository.listProjections("org-a")).toHaveLength(1);
     expect(await repository.listHistory("org-a", contact.id)).toHaveLength(1);
+  });
+  it("replays an unpinned add-to-event key after repository participant resolution", async () => {
+    const repository = new ResolvingCrmRepository();
+    const crm = new CrmService(
+      { repository },
+      {
+        clock: () => new Date("2026-01-01T00:00:00.000Z"),
+        generateId: (prefix) => prefix,
+      },
+    );
+    const contact = await crm.createContact(actor, {
+      organizationId: "org-a",
+      displayName: "Marcus Aurelius",
+      email: "marcus@example.com",
+    });
+    const input = {
+      organizationId: "org-a",
+      contactId: contact.id,
+      eventId: "event-a",
+      idempotencyKey: "resolved-participant",
+    } as const;
+
+    const created = await crm.addContactToEvent(actor, input);
+    const replay = await crm.addContactToEvent(actor, input);
+
+    expect(created.projection.participantId).toBe("canonical-participant");
+    expect(replay).toEqual({ ...created, idempotent: true });
   });
   it("keeps same-name event projections keyed by contact identity", async () => {
     const repository = new InMemoryCrmRepository();

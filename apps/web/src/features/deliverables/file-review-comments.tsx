@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { DeliverableComment } from "./api";
 import styles from "./file-library.module.css";
 import { formatFileTime } from "./file-library-model";
+import { fileFamilyCommentThread, selectedAssetCommentVersion } from "./file-review-model";
 import type { FileReviewContext } from "./file-review-types";
 
 interface FileReviewCommentsProps {
@@ -30,24 +31,10 @@ export function FileReviewComments({
   const [body, setBody] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const thread = useMemo(
-    () =>
-      comments
-        .filter(
-          (comment) =>
-            comment.assetId === context.asset.id &&
-            comment.versionId === (context.asset.versionId ?? context.asset.id),
-        )
-        .sort(
-          (left, right) =>
-            left.createdAt.localeCompare(right.createdAt) ||
-            (left.version ?? 0) - (right.version ?? 0),
-        ),
-    [comments, context.asset.id, context.asset.versionId],
+    () => fileFamilyCommentThread(comments, context.versions),
+    [comments, context.versions],
   );
-  const expectedVersion = thread.reduce(
-    (maximum, comment) => Math.max(maximum, comment.version ?? 0),
-    0,
-  );
+  const expectedVersion = selectedAssetCommentVersion(thread, context.asset.id);
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -81,7 +68,7 @@ export function FileReviewComments({
         </Alert>
       ) : thread.length === 0 ? (
         <p className={styles.muted}>
-          {loading ? "Loading comments…" : "No comments yet for this file version."}
+          {loading ? "Loading comments…" : "No comments yet for this file family."}
         </p>
       ) : (
         <ol className={styles.commentList}>

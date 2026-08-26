@@ -1,5 +1,6 @@
 "use client";
 
+import type { ApiOrganizerResultScope } from "./api-api-organizer-workspace-response";
 import type { ApiPlan } from "./api-api-plan";
 import type { ApiSubmittedReview } from "./api-api-submitted-review";
 import type { ReviewPlanAssignment } from "./assignment-review-plan-assignment";
@@ -47,6 +48,7 @@ export interface ReviewPlanSeed {
   sourceClosesAt?: string | null;
   aggregates: readonly AggregateRow[];
   submittedReviews: readonly ApiSubmittedReview[];
+  resultScopes?: readonly ApiOrganizerResultScope[];
   assignments: readonly ReviewPlanAssignment[];
   progress: {
     totalAssignments: number;

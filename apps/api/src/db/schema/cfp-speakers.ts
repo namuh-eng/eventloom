@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 import { authUsers, organizations } from "./identity-access";
 import { events } from "./program-core";
+import { sessions } from "./sessions-agenda";
 
 const b = (n: string) => integer(n, { mode: "boolean" }).notNull();
 const j = (n: string) => text(n, { mode: "json" }).notNull();
@@ -353,7 +354,7 @@ export const speakerTasks = sqliteTable(
     id: text().primaryKey().notNull(),
     organizationId: text("organization_id").notNull(),
     eventId: text("event_id").notNull(),
-    submissionId: text("submission_id"),
+    sessionId: text("session_id"),
     participantId: text("participant_id").notNull(),
     type: text().notNull(),
     owner: text().notNull(),
@@ -377,8 +378,8 @@ export const speakerTasks = sqliteTable(
       foreignColumns: [participants.organizationId, participants.eventId, participants.id],
     }).onDelete("restrict"),
     foreignKey({
-      columns: [t.organizationId, t.eventId, t.submissionId],
-      foreignColumns: [submissions.organizationId, submissions.eventId, submissions.id],
+      columns: [t.organizationId, t.eventId, t.sessionId],
+      foreignColumns: [sessions.organizationId, sessions.eventId, sessions.id],
     }).onDelete("restrict"),
     unique().on(t.organizationId, t.id),
     unique().on(t.organizationId, t.eventId, t.id),
@@ -389,7 +390,7 @@ export const speakerTasks = sqliteTable(
       t.status,
       t.dueAt,
     ),
-    index("speaker_tasks_submission_idx").on(t.organizationId, t.eventId, t.submissionId),
+    index("speaker_tasks_session_idx").on(t.organizationId, t.eventId, t.sessionId),
     index("speaker_tasks_replacement_baseline_idx").on(
       t.organizationId,
       t.eventId,
@@ -494,7 +495,7 @@ export const speakerAssets = sqliteTable(
     id: text().primaryKey().notNull(),
     organizationId: text("organization_id").notNull(),
     eventId: text("event_id").notNull(),
-    submissionId: text("submission_id"),
+    sessionId: text("session_id"),
     participantId: text("participant_id").notNull(),
     taskId: text("task_id"),
     kind: text().notNull(),
@@ -531,8 +532,8 @@ export const speakerAssets = sqliteTable(
       foreignColumns: [participants.organizationId, participants.eventId, participants.id],
     }).onDelete("restrict"),
     foreignKey({
-      columns: [t.organizationId, t.eventId, t.submissionId],
-      foreignColumns: [submissions.organizationId, submissions.eventId, submissions.id],
+      columns: [t.organizationId, t.eventId, t.sessionId],
+      foreignColumns: [sessions.organizationId, sessions.eventId, sessions.id],
     }).onDelete("restrict"),
     foreignKey({
       columns: [t.organizationId, t.eventId, t.taskId],

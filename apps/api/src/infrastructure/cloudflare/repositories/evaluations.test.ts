@@ -300,6 +300,57 @@ describe("D1EvaluationRepository consistency", () => {
     expect(database.sessionConstraints).toEqual(["first-primary"]);
   });
 
+  it("does not treat resolved new-round audit records as pending lineage repairs", async () => {
+    const database = new RecordingD1();
+    const repository = new D1EvaluationRepository(database as unknown as D1Database);
+
+    database.firstRows.push(null);
+    await expect(repository.hasPendingPlanLineageRepair("org-1", "event-1")).resolves.toBe(false);
+    expect(database.statements[0]?.sql).toContain("reason <> 'resolved_new_round'");
+
+    database.firstRows.push({ organization_id: "org-1" });
+    await expect(repository.hasPendingPlanLineageRepair("org-1", "event-1")).resolves.toBe(true);
+  });
+
+  it("counts every non-resolved lineage marker as pending", async () => {
+    const database = new SqliteD1("eventloom-pending-lineage-repairs-", fullEvaluationSchema);
+    try {
+      database.executeScript(migration("0035_review_plan_revision_lineage.sql"));
+      database.executeScript(migration("0037_review_plan_lineage_repairs.sql"));
+      database.executeScript(`
+        INSERT INTO review_plan_lineage_repairs_required (
+          organization_id, event_id, plan_id, round_id, reason
+        ) VALUES (
+          'org-1', 'event-1', 'plan-1', 'round-new', 'resolved_new_round'
+        );
+      `);
+      const repository = new D1EvaluationRepository(database as unknown as D1Database);
+
+      await expect(repository.hasPendingPlanLineageRepair("org-1", "event-1")).resolves.toBe(false);
+
+      database.executeScript(`
+        INSERT INTO review_plan_lineage_repairs_required (
+          organization_id, event_id, plan_id, round_id, reason
+        ) VALUES ('org-1', 'event-1', 'plan-1', '', 'missing_predecessor_plan');
+      `);
+      await expect(repository.hasPendingPlanLineageRepair("org-1", "event-1")).resolves.toBe(true);
+
+      database.executeScript(`
+        DELETE FROM review_plan_lineage_repairs_required
+         WHERE organization_id = 'org-1'
+           AND event_id = 'event-1'
+           AND plan_id = 'plan-1'
+           AND round_id = '';
+        INSERT INTO review_plan_lineage_repairs_required (
+          organization_id, event_id, plan_id, round_id, reason
+        ) VALUES ('org-1', 'event-1', 'plan-1', 'round-1', 'missing_predecessor_round');
+      `);
+      await expect(repository.hasPendingPlanLineageRepair("org-1", "event-1")).resolves.toBe(true);
+    } finally {
+      database.dispose();
+    }
+  });
+
   it("atomically guards assignment distribution with the authoritative tip and schedule", async () => {
     const database = new RecordingD1();
     const repository = new D1EvaluationRepository(database as unknown as D1Database);
@@ -323,6 +374,7 @@ describe("D1EvaluationRepository consistency", () => {
     const sql = database.statements.map((recorded) => recorded.sql).join("\n");
     expect(sql).toContain("WITH RECURSIVE family");
     expect(sql).toContain("review_plan_lineage_repairs_required");
+    expect(sql).toContain("repair.reason <> 'resolved_new_round'");
     expect(sql).toContain("round.closes_at");
 
     database.statements.length = 0;
@@ -346,6 +398,7 @@ describe("D1EvaluationRepository consistency", () => {
     const cleanupSql = database.statements.map((recorded) => recorded.sql).join("\n");
     expect(cleanupSql).toContain("WITH RECURSIVE family");
     expect(cleanupSql).toContain("review_plan_lineage_repairs_required");
+    expect(cleanupSql).toContain("repair.reason <> 'resolved_new_round'");
     expect(cleanupSql).not.toContain("round.closes_at");
   });
 

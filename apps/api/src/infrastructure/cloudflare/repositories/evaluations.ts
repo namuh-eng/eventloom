@@ -1,13 +1,6 @@
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 
 import { conflict } from "../../../features/evaluations/errors";
-import type { CloudflareOutboxMessage } from "../bindings";
-import {
-  evaluationDecisionOutboxJobId,
-  evaluationDecisionWorkKey,
-  evaluationDecisionWorkPayload,
-  publishEvaluationDecisionJob,
-} from "../evaluation-decision-outbox";
 import type {
   EvaluationPlanRevisionPrecondition,
   EvaluationPlanScheduleState,
@@ -38,6 +31,13 @@ import type {
   RubricCriterion,
   RubricScore,
 } from "../../../features/evaluations/types";
+import type { CloudflareOutboxMessage } from "../bindings";
+import {
+  evaluationDecisionOutboxJobId,
+  evaluationDecisionWorkKey,
+  evaluationDecisionWorkPayload,
+  publishEvaluationDecisionJob,
+} from "../evaluation-decision-outbox";
 import {
   batch,
   booleanValue,
@@ -406,6 +406,7 @@ function authoritativePlanWritableGuard(
               FROM review_plan_lineage_repairs_required repair
              WHERE repair.organization_id = ?
                AND repair.event_id = ?
+               AND repair.reason <> 'resolved_new_round'
           )
           AND NOT EXISTS (
             SELECT 1
@@ -745,6 +746,7 @@ export class D1EvaluationRepository implements EvaluationRepository {
         `SELECT 1
            FROM review_plan_lineage_repairs_required
           WHERE organization_id = ? AND event_id = ?
+            AND reason <> 'resolved_new_round'
           LIMIT 1`,
       )
       .bind(tenantId, eventId)

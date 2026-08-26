@@ -80,7 +80,9 @@ describe("production CFP file asset persistence", () => {
       ),
     ).toEqual([{ participant_id: null }]);
     expect(database.query("SELECT id FROM speaker_assets")).toEqual([]);
-    expect(privateAssets.registered[0]).toMatchObject({ submissionId: submission.id });
+    expect(privateAssets.registered[0]).toMatchObject({
+      subject: { kind: "cfp_submission", submissionId: submission.id },
+    });
   });
 
   it("reissues one pending asset for the same idempotency binding", async () => {

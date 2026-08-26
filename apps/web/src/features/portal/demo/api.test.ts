@@ -26,7 +26,7 @@ function apiWithPortal(loader: PortalApi["getPortal"]): PortalApi {
 }
 
 function emptyPortal(): PortalView {
-  return { submissions: [], profiles: [], tasks: [], outstandingTaskCount: 0 };
+  return { submissions: [], sessions: [], profiles: [], tasks: [], outstandingTaskCount: 0 };
 }
 
 describe("local speaker portal demo adapter", () => {
@@ -38,6 +38,14 @@ describe("local speaker portal demo adapter", () => {
       outstandingTaskCount: 3,
       profiles: [{ displayName: "Ada Lovelace", version: 1 }],
       submissions: [{ status: "accepted" }, { status: "under_review" }],
+      sessions: [
+        {
+          sessionId: "demo-session-resilient-events",
+          title: "Building resilient event systems",
+          status: "confirmed",
+          version: 1,
+        },
+      ],
     });
     expect(first.tasks.map((task) => task.type)).toEqual(["action", "upload", "upload", "form"]);
 
@@ -125,7 +133,7 @@ describe("local speaker portal demo adapter", () => {
         kind: "headshot",
         file: new File(["demo image"], "ada.png", { type: "image/png" }),
       }),
-    ).resolves.toEqual({ assetId: "demo-asset-demo-task-headshot-headshot" });
+    ).resolves.toMatchObject({ id: "demo-asset-demo-task-headshot-headshot" });
     await api.transitionTask({
       eventId,
       taskId: headshot.id,

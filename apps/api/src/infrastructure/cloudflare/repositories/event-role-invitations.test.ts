@@ -51,7 +51,9 @@ function migration(name: string): string {
 function databaseBeforeEventInvitations(): SqliteD1 {
   const database = new SqliteD1("eventloom-pre-event-role-invitations-");
   databases.push(database);
-  for (const name of migrations.slice(0, -1)) database.executeScript(migration(name));
+  for (const name of migrations.slice(0, migrations.indexOf("0027_event_role_invitations.sql"))) {
+    database.executeScript(migration(name));
+  }
   return database;
 }
 
@@ -1224,6 +1226,21 @@ describe("D1EventRoleInvitationRepository", () => {
     ).toBe(1);
 
     const service = new EventInvitationService(repository, { clock: () => new Date(LATER) });
+    await expect(
+      service.list({
+        kind: "user",
+        userId: "other-account",
+        email: "other@example.test",
+        emailVerified: true,
+      }),
+    ).resolves.toEqual([]);
+    invite(database, {
+      id: "invite-speaker-explicit-reassignment",
+      recipientUserId: "other-account",
+      normalizedEmail: "other@example.test",
+      role: "speaker",
+      participantId: "participant-a",
+    });
     const [pending] = await service.list({
       kind: "user",
       userId: "other-account",
@@ -1238,7 +1255,8 @@ describe("D1EventRoleInvitationRepository", () => {
         "participant_id = 'participant-a' AND user_id = 'other-account' AND revoked_at IS NULL",
       ),
     ).toBe(0);
-    if (pending === undefined) throw new Error("Expected a reassigned speaker invitation.");
+    if (pending === undefined)
+      throw new Error("Expected an explicit reassigned speaker invitation.");
     await repository.accept(
       transition(pending.invitationId, "other-account", "other@example.test", pending.version),
     );
@@ -1325,7 +1343,7 @@ describe("D1EventRoleInvitationRepository", () => {
     ).toBe(1);
   });
 
-  it("reconciles late-verified speaker profiles and reviewer pool grants when invitations are listed", async () => {
+  it("requires an explicit organizer speaker invitation despite matching CRM profile data", async () => {
     const { database, repository } = fixture();
     database.executeScript(`
       INSERT INTO participants
@@ -1333,7 +1351,7 @@ describe("D1EventRoleInvitationRepository", () => {
          identity_state,source_type,source_id,claimed_user_id,version,created_at,updated_at)
       VALUES
         ('participant-late','org-a','event-a','Late','Person','Late Person',
-         'unverified@example.test','unverified@example.test','resolved','manual',NULL,NULL,1,
+         'unverified@example.test','unverified@example.test','resolved','crm','contact-late',NULL,1,
          '${NOW}','${NOW}');
       INSERT INTO speaker_profiles
         (id,organization_id,event_id,participant_id,display_name,email,job_title,company,status,
@@ -1342,8 +1360,8 @@ describe("D1EventRoleInvitationRepository", () => {
          source_id,version,created_at,updated_at,admitted_by_account_id,admitted_at)
       VALUES
         ('profile-late','org-a','event-a','participant-late','Late Person',
-         'unverified@example.test','','','active','','{}',0,NULL,NULL,'','','','',NULL,
-         'manual',NULL,1,'${NOW}','${NOW}','organizer-a','${NOW}');
+         'unverified@example.test','','','pending','','{}',0,NULL,NULL,'','','','',NULL,
+         'crm','contact-late',1,'${NOW}','${NOW}',NULL,NULL);
     `);
     addReviewerPool(database, {
       roundId: "round-late",
@@ -1370,21 +1388,55 @@ describe("D1EventRoleInvitationRepository", () => {
     });
     database.run(
       `UPDATE auth_users SET email_verified = 1, updated_at = '${LATER}'
-        WHERE id = 'unverified-account'`,
+       WHERE id = 'unverified-account'`,
     );
 
     await expect(service.list(actor)).resolves.toEqual([
       expect.objectContaining({ role: "reviewer", status: "pending", eventId: "event-a" }),
-      expect.objectContaining({ role: "speaker", status: "pending", eventId: "event-a" }),
     ]);
-    await service.list(actor);
+    await expect(
+      repository.findForVerifiedAccount(
+        "reconciled:speaker:org-a:event-a:participant-late:unverified-account",
+        actor.userId,
+        actor.email,
+      ),
+    ).resolves.toBeNull();
     expect(
       count(
         database,
-        "event_role_invitations",
-        "recipient_user_id = 'unverified-account' AND status = 'pending'",
+        "participant_grants",
+        "participant_id = 'participant-late' AND user_id = 'unverified-account' AND revoked_at IS NULL",
       ),
-    ).toBe(2);
+    ).toBe(0);
+
+    const speaker = await repository.create({
+      id: "invite-late-speaker",
+      organizationId: "org-a",
+      eventId: "event-a",
+      role: "speaker",
+      recipientUserId: actor.userId,
+      normalizedEmail: actor.email,
+      participantId: "participant-late",
+      creationIdempotencyKey: "organizer:invite-late-speaker",
+      invitedByActorType: "user",
+      invitedByActorId: "organizer-a",
+      invitedAt: LATER,
+    });
+    await expect(service.list(actor)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ invitationId: speaker.id, role: "speaker", status: "pending" }),
+      ]),
+    );
+    await expect(
+      service.accept(actor, { invitationId: speaker.id, expectedVersion: speaker.version }),
+    ).resolves.toMatchObject({ invitationId: speaker.id, status: "accepted" });
+    expect(
+      count(
+        database,
+        "participant_grants",
+        "participant_id = 'participant-late' AND user_id = 'unverified-account' AND revoked_at IS NULL",
+      ),
+    ).toBe(1);
   });
 
   it("reconciles an active organization reviewer membership with existing pool access", async () => {

@@ -10,6 +10,7 @@ import {
 } from "../features/agenda/engine";
 import { localDateInTimeZone } from "../features/agenda/timezone";
 import type {
+  AgendaCatalog,
   PublishedAgendaRevision as AgendaPublishedRevision,
   AgendaState,
 } from "../features/agenda/types";
@@ -38,6 +39,7 @@ export interface AgendaEventMetadata {
 export interface AgendaRouteDependencies {
   readonly engine: AgendaEngine;
   readonly organizationIdForEvent: (eventId: string) => Promise<string | null>;
+  readonly agendaCatalogForEvent: (eventId: string) => Promise<AgendaCatalog>;
   readonly afterPublish?: (eventId: string, revision: AgendaPublishedRevision) => Promise<void>;
   readonly eventMetadataForEvent?: (eventId: string) => Promise<AgendaEventMetadata | null>;
   readonly eventIdForSlug?: (eventSlug: string) => Promise<string | null>;
@@ -59,35 +61,9 @@ const calendarUidDomainSchema = z
   .regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u);
 const identifierSchema = z.string().trim().min(1).max(200);
 const expectedVersionSchema = z.number().int().positive();
-const sessionSchema = z
-  .object({
-    id: identifierSchema,
-    title: z.string().trim().min(1).max(1_000),
-    status: z.literal("accepted"),
-    participantIds: z.array(identifierSchema).max(100),
-    resourceIds: z.array(identifierSchema).max(100),
-    capacityRequired: z.number().int().nonnegative(),
-    durationMinutes: z.number().int().positive().max(1_440).optional(),
-    format: z.string().trim().min(1).max(500).optional(),
-    summary: z.string().trim().max(20_000).optional(),
-    speakerNames: z.array(z.string().trim().min(1).max(500)).max(100).optional(),
-  })
+const createAgendaSchema = z
+  .object({ minimumTravelMinutes: z.number().int().nonnegative().max(1_440) })
   .strict();
-const roomSchema = z
-  .object({
-    id: identifierSchema,
-    name: z.string().trim().min(1).max(500),
-    capacity: z.number().int().positive(),
-  })
-  .strict();
-const trackSchema = z
-  .object({ id: identifierSchema, name: z.string().trim().min(1).max(500) })
-  .strict();
-const catalogSchema = z.object({
-  sessions: z.array(sessionSchema).max(2_000),
-  rooms: z.array(roomSchema).max(500),
-  tracks: z.array(trackSchema).max(500),
-});
 const entrySchema = z
   .object({
     id: identifierSchema,
@@ -99,9 +75,6 @@ const entrySchema = z
     startDisambiguation: z.enum(["earlier", "later"]).optional(),
     endDisambiguation: z.enum(["earlier", "later"]).optional(),
   })
-  .strict();
-const createAgendaSchema = catalogSchema
-  .extend({ minimumTravelMinutes: z.number().int().nonnegative().max(1_440) })
   .strict();
 const updateDraftSchema = z
   .object({ expectedVersion: expectedVersionSchema, entries: z.array(entrySchema).max(2_000) })
@@ -687,24 +660,12 @@ export function createAgendaAdminRoutes(
     const principal = await organizerForEvent(context, dependencies);
     const input = await body(context, createAgendaSchema);
     const eventId = routeParam(context, "eventId");
+    const catalog = await dependencies.agendaCatalogForEvent(eventId);
     const data = await dependencies.engine.createAgenda({
       eventId,
       actorId: principal.userId,
+      ...catalog,
       ...input,
-      sessions: input.sessions.map((session) => ({
-        id: session.id,
-        title: session.title,
-        status: session.status,
-        participantIds: session.participantIds,
-        resourceIds: session.resourceIds,
-        capacityRequired: session.capacityRequired,
-        ...(session.durationMinutes === undefined
-          ? {}
-          : { durationMinutes: session.durationMinutes }),
-        ...(session.format === undefined ? {} : { format: session.format }),
-        ...(session.summary === undefined ? {} : { summary: session.summary }),
-        ...(session.speakerNames === undefined ? {} : { speakerNames: session.speakerNames }),
-      })),
     });
     return context.json({ data }, 201);
   });

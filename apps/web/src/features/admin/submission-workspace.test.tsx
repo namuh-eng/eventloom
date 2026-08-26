@@ -8,10 +8,11 @@ import {
   SubmissionListWorkspace,
 } from "./submission-workspace";
 import {
-  DECISION_COMMITTED_WITHOUT_DELIVERY_MESSAGE,
   createEvaluationDecisionAttempt,
+  DECISION_COMMITTED_WITHOUT_DELIVERY_MESSAGE,
   decisionAttemptMatches,
   decisionNotificationSummary,
+  type EvaluationDecisionRecord,
   enrichCanonicalSubmission,
   getAcceptedHandoffMetadata,
   indexOrganizerEvaluationWorkspace,
@@ -22,9 +23,8 @@ import {
   loadOrganizerEventName,
   mapCanonicalSubmission,
   mergeCanonicalSubmissionEvaluation,
-  reconcileEvaluationDecisionFailure,
-  type EvaluationDecisionRecord,
   type OrganizerEvaluationWorkspace,
+  reconcileEvaluationDecisionFailure,
   submissionListState,
   submissionLoadErrorMessage,
   submissionLoadFailure,
@@ -519,7 +519,7 @@ describe("organizer submission workspace", () => {
       fetchMock.mockRestore();
     }
   });
-  it("uses the same-origin gateway and keeps canonical submissions visible when aggregates fail", async () => {
+  it("uses the assigned Initial Review aggregate instead of an empty future round", async () => {
     const requests: string[] = [];
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
@@ -534,17 +534,51 @@ describe("organizer submission workspace", () => {
                 { id: "round-final", sequence: 2 },
               ],
             },
+            resultScopes: [
+              {
+                planId: "plan-1",
+                planVersion: 1,
+                lineageOrdinal: 0,
+                planName: "Taming",
+                roundId: "round-initial",
+                roundName: "Initial Review",
+                sequence: 1,
+                historical: false,
+              },
+              {
+                planId: "plan-1",
+                planVersion: 1,
+                lineageOrdinal: 0,
+                planName: "Taming",
+                roundId: "round-final",
+                roundName: "Final Review",
+                sequence: 2,
+                historical: false,
+              },
+            ],
             assignments: [
               {
                 id: "assignment-1",
+                planId: "plan-1",
                 reviewerId: "reviewer-1",
                 submissionId: "submission-devflow-1",
+                roundId: "round-initial",
                 status: "submitted",
               },
             ],
             decisions: {},
             aggregates: [
               {
+                planId: "plan-1",
+                submissionId: "submission-devflow-1",
+                roundId: "round-initial",
+                submittedReviewCount: 1,
+                expectedReviewCount: 1,
+                averageWeightedTotal: 11,
+                possibleWeightedTotal: 20,
+              },
+              {
+                planId: "plan-1",
                 submissionId: "submission-devflow-1",
                 roundId: "round-final",
                 submittedReviewCount: 0,
@@ -561,6 +595,8 @@ describe("organizer submission workspace", () => {
           data: {
             reviews: [
               {
+                planId: "plan-1",
+                roundId: "round-initial",
                 assignmentId: "assignment-1",
                 submissionId: "submission-devflow-1",
                 comment: "Ready for the committee.",
@@ -598,7 +634,7 @@ describe("organizer submission workspace", () => {
         id: "submission-devflow-1",
         title: "Taming 40-Minute CI: Incremental Builds at Monorepo Scale",
         evaluationPlanId: "plan-1",
-        reviewSummary: { completed: 0, total: 1, averageScore: null, maxScore: 0 },
+        reviewSummary: { completed: 1, total: 1, averageScore: 11, maxScore: 20 },
         reviewAssignments: [
           {
             reviewer: "Sam Whitfield",
@@ -617,6 +653,9 @@ describe("organizer submission workspace", () => {
       expect(requests.filter((request) => request.includes("/organizer/workspace"))).toHaveLength(
         1,
       );
+      expect(requests).toContain(
+        "/api/admin/evaluations/plans/plan-1/rounds/round-initial/submissions/submission-devflow-1/reviews",
+      );
       expect(requests.some((request) => request.includes("/plans?eventId="))).toBe(false);
       expect(requests.some((request) => request.endsWith("/assignments"))).toBe(false);
       expect(requests.some((request) => request.endsWith("/aggregate"))).toBe(false);
@@ -624,6 +663,363 @@ describe("organizer submission workspace", () => {
     } finally {
       fetchMock.mockRestore();
     }
+  });
+  it("keeps predecessor ABS results isolated from the active Taming source scope", async () => {
+    const requests: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.includes("/organizer/workspace?eventId=")) {
+        return Response.json({
+          data: {
+            plan: { id: "plan-taming", rounds: [{ id: "round-review", sequence: 1 }] },
+            resultScopes: [
+              {
+                planId: "plan-abs",
+                planVersion: 1,
+                lineageOrdinal: 0,
+                planName: "ABS",
+                roundId: "round-review",
+                roundName: "ABS Review",
+                sequence: 1,
+                historical: true,
+              },
+              {
+                planId: "plan-taming",
+                planVersion: 2,
+                lineageOrdinal: 1,
+                planName: "Taming",
+                roundId: "round-review",
+                roundName: "Taming Review",
+                sequence: 1,
+                historical: false,
+              },
+            ],
+            assignments: [
+              {
+                id: "assignment-abs",
+                planId: "plan-abs",
+                reviewerId: "reviewer-1",
+                submissionId: canonicalEnvelope.submission.id,
+                roundId: "round-review",
+                status: "submitted",
+              },
+            ],
+            aggregates: [
+              {
+                planId: "plan-abs",
+                roundId: "round-review",
+                submissionId: canonicalEnvelope.submission.id,
+                submittedReviewCount: 1,
+                expectedReviewCount: 1,
+                averageWeightedTotal: 7,
+                possibleWeightedTotal: 10,
+              },
+              {
+                planId: "plan-taming",
+                roundId: "round-review",
+                submissionId: canonicalEnvelope.submission.id,
+                submittedReviewCount: 9,
+                expectedReviewCount: 9,
+                averageWeightedTotal: 99,
+                possibleWeightedTotal: 100,
+              },
+            ],
+            decisions: {},
+          },
+        });
+      }
+      if (url.endsWith("/reviews")) {
+        return Response.json({
+          data: {
+            reviews: [
+              {
+                planId: "plan-abs",
+                roundId: "round-review",
+                assignmentId: "assignment-abs",
+                submissionId: canonicalEnvelope.submission.id,
+                comment: "ABS reviewer comment.",
+                scores: { abs_criterion: { value: 7 } },
+              },
+            ],
+          },
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    try {
+      const submission = await enrichCanonicalSubmission("", canonicalEnvelope);
+      expect(submission.reviewSummary).toMatchObject({
+        completed: 1,
+        total: 1,
+        averageScore: 7,
+        maxScore: 10,
+      });
+      expect(submission.reviewAssignments).toEqual([
+        expect.objectContaining({
+          comment: "ABS reviewer comment.",
+          criterionScores: [{ criterion: "Abs Criterion", value: 7 }],
+        }),
+      ]);
+      expect(requests).toContain(
+        "/api/admin/evaluations/plans/plan-abs/rounds/round-review/submissions/submission-devflow-1/reviews",
+      );
+      expect(requests.some((request) => request.includes("/plans/plan-taming/rounds/"))).toBe(
+        false,
+      );
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+  it("chooses the newest three-plan lineage result despite the oldest plan's higher version", () => {
+    const submission = mergeCanonicalSubmissionEvaluation(
+      canonicalEnvelope,
+      indexOrganizerEvaluationWorkspace({
+        plan: { id: "plan-taming", rounds: [{ id: "round-review", sequence: 1 }] },
+        resultScopes: [
+          {
+            planId: "plan-abs",
+            planVersion: 99,
+            lineageOrdinal: 0,
+            planName: "ABS",
+            roundId: "round-review",
+            roundName: "ABS Review",
+            sequence: 1,
+            historical: true,
+          },
+          {
+            planId: "plan-calibrate",
+            planVersion: 2,
+            lineageOrdinal: 1,
+            planName: "Calibrate",
+            roundId: "round-review",
+            roundName: "Calibration Review",
+            sequence: 1,
+            historical: true,
+          },
+          {
+            planId: "plan-taming",
+            planVersion: 1,
+            lineageOrdinal: 2,
+            planName: "Taming",
+            roundId: "round-review",
+            roundName: "Taming Review",
+            sequence: 1,
+            historical: false,
+          },
+        ],
+        assignments: [
+          {
+            id: "assignment-abs",
+            planId: "plan-abs",
+            reviewerId: "reviewer-abs",
+            submissionId: canonicalEnvelope.submission.id,
+            roundId: "round-review",
+            status: "submitted",
+          },
+          {
+            id: "assignment-calibrate",
+            planId: "plan-calibrate",
+            reviewerId: "reviewer-calibrate",
+            submissionId: canonicalEnvelope.submission.id,
+            roundId: "round-review",
+            status: "submitted",
+          },
+          {
+            id: "assignment-taming",
+            planId: "plan-taming",
+            reviewerId: "reviewer-taming",
+            submissionId: canonicalEnvelope.submission.id,
+            roundId: "round-review",
+            status: "in_progress",
+          },
+        ],
+        aggregates: [
+          {
+            planId: "plan-abs",
+            roundId: "round-review",
+            submissionId: canonicalEnvelope.submission.id,
+            submittedReviewCount: 1,
+            expectedReviewCount: 1,
+            averageWeightedTotal: 7,
+            possibleWeightedTotal: 10,
+          },
+          {
+            planId: "plan-calibrate",
+            roundId: "round-review",
+            submissionId: canonicalEnvelope.submission.id,
+            submittedReviewCount: 1,
+            expectedReviewCount: 1,
+            averageWeightedTotal: 8,
+            possibleWeightedTotal: 15,
+          },
+          {
+            planId: "plan-taming",
+            roundId: "round-review",
+            submissionId: canonicalEnvelope.submission.id,
+            submittedReviewCount: 0,
+            expectedReviewCount: 2,
+            averageWeightedTotal: null,
+            possibleWeightedTotal: 20,
+          },
+        ],
+        decisions: {},
+      }),
+    );
+
+    expect(submission.reviewSummary).toMatchObject({ completed: 0, total: 2, maxScore: 20 });
+    expect(submission.reviewAssignments).toEqual([
+      expect.objectContaining({ status: "in_progress" }),
+    ]);
+  });
+  it("moves detail review data to the highest round including an abstention", () => {
+    const workspace: OrganizerEvaluationWorkspace = {
+      plan: {
+        id: "plan-1",
+        rounds: [
+          { id: "round-initial", sequence: 1 },
+          { id: "round-final", sequence: 2 },
+        ],
+      },
+      resultScopes: [
+        {
+          planId: "plan-1",
+          planVersion: 1,
+          lineageOrdinal: 0,
+          planName: "Taming",
+          roundId: "round-initial",
+          roundName: "Initial Review",
+          sequence: 1,
+          historical: false,
+        },
+        {
+          planId: "plan-1",
+          planVersion: 1,
+          lineageOrdinal: 0,
+          planName: "Taming",
+          roundId: "round-final",
+          roundName: "Final Review",
+          sequence: 2,
+          historical: false,
+        },
+      ],
+      assignments: [
+        {
+          planId: "plan-1",
+          id: "assignment-initial",
+          reviewerId: "reviewer-1",
+          submissionId: canonicalEnvelope.submission.id,
+          roundId: "round-initial",
+          status: "submitted",
+        },
+        {
+          planId: "plan-1",
+          id: "assignment-final",
+          reviewerId: "reviewer-2",
+          submissionId: canonicalEnvelope.submission.id,
+          roundId: "round-final",
+          status: "abstained",
+        },
+      ],
+      aggregates: [
+        {
+          planId: "plan-1",
+          roundId: "round-initial",
+          submissionId: canonicalEnvelope.submission.id,
+          submittedReviewCount: 1,
+          expectedReviewCount: 1,
+          averageWeightedTotal: 11,
+          possibleWeightedTotal: 20,
+        },
+        {
+          planId: "plan-1",
+          roundId: "round-final",
+          submissionId: canonicalEnvelope.submission.id,
+          submittedReviewCount: 0,
+          expectedReviewCount: 2,
+          averageWeightedTotal: null,
+          possibleWeightedTotal: 30,
+        },
+      ],
+      decisions: {},
+    };
+
+    const submission = mergeCanonicalSubmissionEvaluation(
+      canonicalEnvelope,
+      indexOrganizerEvaluationWorkspace(workspace),
+    );
+
+    expect(submission.reviewSummary).toMatchObject({
+      completed: 0,
+      total: 2,
+      averageScore: null,
+      maxScore: 30,
+    });
+    expect(submission.reviewAssignments).toEqual([
+      expect.objectContaining({ status: "abstained" }),
+    ]);
+  });
+  it("falls back to the initial round when a submission has no assignments", () => {
+    const submission = mergeCanonicalSubmissionEvaluation(
+      canonicalEnvelope,
+      indexOrganizerEvaluationWorkspace({
+        plan: {
+          id: "plan-1",
+          rounds: [
+            { id: "round-initial", sequence: 1 },
+            { id: "round-final", sequence: 2 },
+          ],
+        },
+        resultScopes: [
+          {
+            planId: "plan-1",
+            planVersion: 1,
+            lineageOrdinal: 0,
+            planName: "Taming",
+            roundId: "round-initial",
+            roundName: "Initial Review",
+            sequence: 1,
+            historical: false,
+          },
+          {
+            planId: "plan-1",
+            planVersion: 1,
+            lineageOrdinal: 0,
+            planName: "Taming",
+            roundId: "round-final",
+            roundName: "Final Review",
+            sequence: 2,
+            historical: false,
+          },
+        ],
+        assignments: [],
+        aggregates: [
+          {
+            planId: "plan-1",
+            roundId: "round-initial",
+            submissionId: canonicalEnvelope.submission.id,
+            submittedReviewCount: 0,
+            expectedReviewCount: 0,
+            averageWeightedTotal: null,
+            possibleWeightedTotal: 20,
+          },
+          {
+            planId: "plan-1",
+            roundId: "round-final",
+            submissionId: canonicalEnvelope.submission.id,
+            submittedReviewCount: 0,
+            expectedReviewCount: 1,
+            averageWeightedTotal: null,
+            possibleWeightedTotal: 30,
+          },
+        ],
+        decisions: {},
+      }),
+    );
+
+    expect(submission.reviewSummary).toMatchObject({ total: 0, maxScore: 20 });
+    expect(submission.reviewAssignments).toEqual([]);
   });
   it("loads canonical titles independently of the event-wide evaluation batch", async () => {
     let releaseWorkspace: ((response: Response) => void) | undefined;
@@ -659,6 +1055,7 @@ describe("organizer submission workspace", () => {
         Response.json({
           data: {
             plan: { id: "plan-1", rounds: [{ id: "round-1", sequence: 1 }] },
+            resultScopes: [],
             assignments: [],
             aggregates: [],
             decisions: {},
@@ -729,8 +1126,21 @@ describe("organizer submission workspace", () => {
     const internalOrganizerId = "organizer-internal-456";
     const workspace: OrganizerEvaluationWorkspace = {
       plan: { id: "plan-1", rounds: [{ id: "round-1", sequence: 1 }] },
+      resultScopes: [
+        {
+          planId: "plan-1",
+          planVersion: 1,
+          lineageOrdinal: 0,
+          planName: "Taming",
+          roundId: "round-1",
+          roundName: "Review",
+          sequence: 1,
+          historical: false,
+        },
+      ],
       assignments: [
         {
+          planId: "plan-1",
           id: "assignment-1",
           reviewerId: internalReviewerId,
           submissionId: canonicalEnvelope.submission.id,
@@ -740,6 +1150,7 @@ describe("organizer submission workspace", () => {
       ],
       aggregates: [
         {
+          planId: "plan-1",
           roundId: "round-1",
           submissionId: canonicalEnvelope.submission.id,
           submittedReviewCount: 0,
@@ -791,17 +1202,32 @@ describe("organizer submission workspace", () => {
         return Response.json({
           data: {
             plan: { id: "plan-1", rounds: [{ id: "round-final", sequence: 2 }] },
+            resultScopes: [
+              {
+                planId: "plan-1",
+                planVersion: 1,
+                lineageOrdinal: 0,
+                planName: "Taming",
+                roundId: "round-final",
+                roundName: "Final Review",
+                sequence: 2,
+                historical: false,
+              },
+            ],
             assignments: [
               {
+                planId: "plan-1",
                 id: "assignment-1",
                 reviewerId: "reviewer-1",
                 submissionId: canonicalEnvelope.submission.id,
+                roundId: "round-final",
                 status: "submitted",
               },
             ],
             decisions: {},
             aggregates: [
               {
+                planId: "plan-1",
                 roundId: "round-final",
                 submissionId: canonicalEnvelope.submission.id,
                 submittedReviewCount: 1,
@@ -970,9 +1396,22 @@ describe("organizer submission workspace", () => {
         return Response.json({
           data: {
             plan: { id: "plan-1", rounds: [{ id: "round-final", sequence: 1 }] },
+            resultScopes: [
+              {
+                planId: "plan-1",
+                planVersion: 1,
+                lineageOrdinal: 0,
+                planName: "Taming",
+                roundId: "round-final",
+                roundName: "Final Review",
+                sequence: 1,
+                historical: false,
+              },
+            ],
             assignments: [],
             aggregates: [
               {
+                planId: "plan-1",
                 roundId: "round-final",
                 submissionId: canonicalEnvelope.submission.id,
                 submittedReviewCount: 0,

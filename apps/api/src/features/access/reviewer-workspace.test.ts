@@ -108,7 +108,7 @@ function dependencies(overrides: Partial<AccessRouteDependencies> = {}): AccessR
     listSpeakerContextScopes: async () => [],
     speakerTasks: {
       resolveScope: async () => null,
-      listSubmissions: async () => [],
+      listSessions: async () => [],
       listTasks: async () => [],
     },
     reviewerWorkspace: {

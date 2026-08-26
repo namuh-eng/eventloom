@@ -15,9 +15,9 @@ import { MAX_REVISION_RECONCILIATION_ROUNDS } from "./revision-schedule-sync";
 import {
   type EvaluationDecisionProjectionInput,
   type EvaluationEventMetadataSource,
-  type EvaluationSessionDecisionReconciliationInput,
   EvaluationService,
   type EvaluationServiceOptions,
+  type EvaluationSessionDecisionReconciliationInput,
 } from "./service";
 import type {
   EvaluationActor,
@@ -79,16 +79,6 @@ class StaleAssignmentRepository extends InMemoryEvaluationRepository {
   ): Promise<EvaluationAssignment | null> {
     const assignment = await super.getAssignment(tenantId, assignmentId);
     return assignment === null ? null : { ...assignment, status: "assigned" };
-  }
-}
-
-class AbstainedAssignmentRepository extends InMemoryEvaluationRepository {
-  override async getAssignment(
-    tenantId: string,
-    assignmentId: string,
-  ): Promise<EvaluationAssignment | null> {
-    const assignment = await super.getAssignment(tenantId, assignmentId);
-    return assignment === null ? null : { ...assignment, status: "abstained" };
   }
 }
 
@@ -405,24 +395,6 @@ class WorkspaceBatchSource extends InMemorySubmissionReviewSource {
     this.organizerListCalls = 0;
     this.organizerListStarted = null;
     this.organizerBatchGate = null;
-  }
-}
-
-class GatedSubmissionSource extends InMemorySubmissionReviewSource {
-  readCount = 0;
-  gateReadNumber: number | null = null;
-  readGate: Promise<void> | null = null;
-  readEntered: (() => void) | null = null;
-
-  override async getSubmissionForReview(
-    ...args: Parameters<InMemorySubmissionReviewSource["getSubmissionForReview"]>
-  ) {
-    this.readCount += 1;
-    if (this.readCount === this.gateReadNumber) {
-      this.readEntered?.();
-      if (this.readGate !== null) await this.readGate;
-    }
-    return super.getSubmissionForReview(...args);
   }
 }
 
@@ -1765,37 +1737,24 @@ describe("evaluation plans and assignments", () => {
       status: "accepted",
       submissionId: submission.id,
     });
-    expect(workspace.diagnostics).toBeUndefined();
   });
-  it("returns core organizer data with diagnostics when decision hydration fails", async () => {
+  it("rejects organizer workspaces when decision hydration fails without returning empty decisions", async () => {
     const repository = new WorkspaceBatchRepository();
     const submissions = new WorkspaceBatchSource([submission]);
     const { service } = await fixture({ repository, submissions, reviewsPerSubmission: 1 });
-    const assignment = await assignOne(service);
+    await assignOne(service);
     repository.resetCounts();
     submissions.resetCounts();
-    repository.organizerWorkspaceFailure = new Error("Decision row could not be decoded.");
+    const decisionFailure = new Error("Decision row could not be decoded.");
+    repository.organizerWorkspaceFailure = decisionFailure;
 
-    const workspace = await service.getOrganizerWorkspace(organizer, eventId);
+    await expect(service.getOrganizerWorkspace(organizer, eventId)).rejects.toBe(decisionFailure);
 
     expect(repository.planListCalls).toBe(1);
     expect(repository.organizerWorkspaceCalls).toBe(1);
-    expect(repository.assignmentListCalls).toBe(1);
-    expect(repository.reviewListCalls).toBe(1);
-    expect(workspace).toMatchObject({
-      plan: { id: "plan-1" },
-      submissions: [{ id: submission.id }],
-      assignments: [{ id: assignment.id }],
-      progress: { planId: "plan-1", total: 1 },
-      aggregates: [{ submissionId: submission.id, roundId: round.id }],
-      decisions: {},
-      diagnostics: [
-        {
-          code: "decisions_unavailable",
-          message: "Decision data is temporarily unavailable.",
-        },
-      ],
-    });
+    expect(repository.assignmentListCalls).toBe(0);
+    expect(repository.reviewListCalls).toBe(0);
+    expect(submissions.organizerListCalls).toBe(1);
   });
 
   it("includes only explicitly reviewable submissions in organizer workspaces", async () => {
@@ -2489,6 +2448,7 @@ describe("conflicts, progress, and decisions", () => {
     });
     expect(progress.reviewers).toEqual([
       {
+        planId: "plan-1",
         roundId: "round-1",
         reviewerId: "reviewer-1",
         assigned: 0,
@@ -3586,6 +3546,149 @@ describe("evaluation authoring and advisory suggestion lifecycle", () => {
     expect(await repository.listReviews(tenantId, revision.id)).toEqual([]);
   });
 
+  it("projects immutable predecessor reviews through an active revision without mixing rubrics", async () => {
+    const absRound = { ...round, name: "ABS" };
+    const { service, plan } = await fixture({ reviewsPerSubmission: 3, reviewRound: absRound });
+    const allPredecessorAssignments = await service.assignReviewers(organizer, {
+      planId: plan.id,
+      roundId: absRound.id,
+      submissionId: submission.id,
+      reviewerIds: ["reviewer-1", "reviewer-2", "reviewer-4"],
+    });
+    const predecessorAssignments = allPredecessorAssignments.filter(
+      (assignment) => assignment.reviewerId !== "reviewer-4",
+    );
+    const outstandingPredecessorAssignment = allPredecessorAssignments.find(
+      (assignment) => assignment.reviewerId === "reviewer-4",
+    );
+    if (outstandingPredecessorAssignment === undefined) {
+      throw new Error("Expected an outstanding predecessor assignment.");
+    }
+    for (const assignment of predecessorAssignments) {
+      const draft = await service.saveReview(reviewer(assignment.reviewerId), assignment.id, {
+        scores: [
+          { criterionId: "quality", value: 4, origin: "human" },
+          { criterionId: "relevance", value: 8, origin: "human" },
+        ],
+        comment: `ABS ${assignment.reviewerId}`,
+      });
+      await service.submitReview(reviewer(assignment.reviewerId), assignment.id, draft.version);
+    }
+    const closed = await service.closePlan(organizer, plan.id, plan.version, crypto.randomUUID());
+    const reopened = await service.openPlan(
+      organizer,
+      closed.id,
+      closed.version,
+      crypto.randomUUID(),
+    );
+    const revision = await service.revisePlanToDraft(organizer, reopened.id, {
+      expectedVersion: reopened.version,
+    });
+    const revisionRound = revision.rounds[0];
+    const sourceCriterion = round.rubric.criteria[0];
+    if (revisionRound === undefined || sourceCriterion === undefined) {
+      throw new Error("Expected source and revision rounds.");
+    }
+    const tamingRound = {
+      ...revisionRound,
+      name: "Taming",
+      rubric: {
+        ...round.rubric,
+        id: "taming-rubric",
+        criteria: [{ ...sourceCriterion, id: "taming-quality", weight: 1 }],
+      },
+    };
+    const authoredRevision = await service.updatePlan(organizer, revision.id, {
+      expectedVersion: revision.version,
+      rounds: [tamingRound],
+    });
+    const activeRevision = await service.openPlan(
+      organizer,
+      authoredRevision.id,
+      authoredRevision.version,
+      crypto.randomUUID(),
+    );
+    const [activeAssignment] = await service.assignReviewers(organizer, {
+      planId: activeRevision.id,
+      roundId: tamingRound.id,
+      submissionId: submission.id,
+      reviewerIds: ["reviewer-3"],
+    });
+    if (activeAssignment === undefined) throw new Error("Expected an active revision assignment.");
+
+    const workspace = await service.getOrganizerWorkspace(organizer, eventId, activeRevision.id);
+
+    expect(workspace.plan.id).toBe(activeRevision.id);
+    expect(workspace.assignments.map((assignment) => assignment.id).sort()).toEqual(
+      [
+        ...predecessorAssignments.map((assignment) => assignment.id),
+        outstandingPredecessorAssignment.id,
+        activeAssignment.id,
+      ].sort(),
+    );
+    expect(workspace.progress).toMatchObject({
+      planId: activeRevision.id,
+      total: 1,
+      assigned: 1,
+      inProgress: 0,
+      submitted: 0,
+      reviewers: [expect.objectContaining({ planId: activeRevision.id })],
+    });
+    expect(workspace.submittedReviews).toEqual(
+      expect.arrayContaining(
+        predecessorAssignments.map((assignment) =>
+          expect.objectContaining({
+            planId: plan.id,
+            roundId: absRound.id,
+            reviewerId: assignment.reviewerId,
+          }),
+        ),
+      ),
+    );
+    expect(workspace.resultScopes).toEqual([
+      expect.objectContaining({
+        planId: plan.id,
+        lineageOrdinal: 0,
+        planName: plan.name,
+        roundId: absRound.id,
+        roundName: "ABS",
+        historical: true,
+      }),
+      expect.objectContaining({
+        planId: activeRevision.id,
+        lineageOrdinal: 1,
+        planName: activeRevision.name,
+        roundId: tamingRound.id,
+        roundName: "Taming",
+        historical: false,
+      }),
+    ]);
+    const absAggregate = workspace.aggregates.find(
+      (aggregate) => aggregate.planId === plan.id && aggregate.roundId === absRound.id,
+    );
+    const tamingAggregate = workspace.aggregates.find(
+      (aggregate) => aggregate.planId === activeRevision.id && aggregate.roundId === tamingRound.id,
+    );
+    expect(absAggregate).toMatchObject({ submittedReviewCount: 2, possibleWeightedTotal: 20 });
+    expect(tamingAggregate).toMatchObject({ submittedReviewCount: 0, possibleWeightedTotal: 5 });
+    expect(new Set(workspace.assignments.map((assignment) => assignment.id)).size).toBe(4);
+    expect(new Set(workspace.submittedReviews.map((review) => review.id)).size).toBe(2);
+    const predecessorWorkspace = await service.getOrganizerWorkspace(organizer, eventId, plan.id);
+    expect(predecessorWorkspace.assignments.map((assignment) => assignment.id).sort()).toEqual(
+      [
+        ...predecessorAssignments.map((assignment) => assignment.id),
+        outstandingPredecessorAssignment.id,
+      ].sort(),
+    );
+    expect(predecessorWorkspace.resultScopes).toEqual([
+      expect.objectContaining({
+        planId: plan.id,
+        lineageOrdinal: 0,
+        roundId: absRound.id,
+        historical: false,
+      }),
+    ]);
+  });
   it("rejects a partial provider result without persisting a suggestion", async () => {
     await expectProviderCandidatesRejected([validAiCandidates()[0]]);
   });

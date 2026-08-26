@@ -59,7 +59,6 @@ it("atomically records rejected speaker asset cleanup intent", async () => {
     id: "asset-rejected-cleanup",
     tenantId: organizationId,
     eventId,
-    submissionId: acceptedSubmissionId,
     participantId: acceptedParticipantId,
     kind: "slides",
     objectKey: "speaker/private/rejected-cleanup.pdf",
@@ -264,7 +263,7 @@ async function publishHeadshotScenario(input: {
       acceptedAssetKinds: ["headshot"],
       allowedMimeTypes: ["image/png"],
       maxBytes: 100_000,
-      assignments: [{ participantId, submissionId: null }],
+      assignments: [{ participantId, subject: { type: "participant" } }],
     });
     taskId = assigned[0]?.id;
     expect(taskId).toBeDefined();
@@ -395,6 +394,13 @@ async function publishHeadshotScenario(input: {
     (candidate) => candidate.speakerIds.includes(participantId),
   );
   if (session === undefined) throw new Error("Expected the accepted public headshot session.");
+  fixture.database.executeScript(`
+    UPDATE sessions
+       SET content_status = 'Approved'
+     WHERE organization_id = '${organizationId}'
+       AND event_id = '${eventId}'
+       AND id = '${session.id}';
+  `);
   try {
     await businessRepositories.sessions.putRoom(
       {
@@ -467,6 +473,7 @@ async function publishHeadshotScenario(input: {
         id: session.id,
         title: session.title,
         status: session.status,
+        publicApprovalEligible: true,
         participantIds: session.speakerIds,
         resourceIds: session.resourceIds,
         capacityRequired: session.capacityRequired,
@@ -844,6 +851,90 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       }),
     ).rejects.toThrow("d1 unavailable");
   });
+  it("projects only accepted canonical D1 sessions to organizers and invited portal speakers", async () => {
+    const fixture = createSpeakerLifecycleFixture();
+    fixtures.push(fixture);
+    const { service } = fixture.createPhase();
+    const created = await service.createOrganizerSpeaker({
+      organizationId,
+      eventId,
+      accountId: organizerAccountId,
+      displayName: "Marcus Chen",
+      email: "marcus@example.test",
+      jobTitle: "Developer Advocate",
+      company: "Cloud Co",
+      biography: "Marcus biography.",
+      socialLinks: {},
+      status: "confirmed",
+      idempotencyKey: "canonical-marcus",
+      sourceType: "manual",
+      sourceId: "canonical-marcus",
+    });
+    const marcus = created.speakers.find((speaker) => speaker.email === "marcus@example.test");
+    if (marcus === undefined) throw new Error("Expected Marcus in the organizer roster.");
+
+    fixture.database.executeScript(`
+      INSERT INTO sessions
+        (id, organization_id, event_id, title, description, status, content_status,
+         duration_minutes, capacity_required, room_id, format_id, level_id, version, created_at,
+         updated_at, created_by, updated_by, deleted_at)
+      VALUES
+        ('lightning-session', '${organizationId}', '${eventId}', 'Lightning Talk', '', 'accepted',
+         NULL, 15, 0, NULL, NULL, NULL, 7, '2099-08-15T04:00:00.000Z',
+         '2099-08-15T04:00:00.000Z', '${organizerAccountId}', '${organizerAccountId}', NULL);
+      INSERT INTO session_speakers
+        (organization_id, event_id, session_id, speaker_id, display_name, role, ordinal)
+      VALUES
+        ('${organizationId}', '${eventId}', 'lightning-session', '${marcus.participantId}',
+         'Marcus Chen', 'speaker', 0),
+        ('${organizationId}', '${eventId}', 'lightning-session', '${acceptedParticipantId}',
+         'Accepted Speaker', 'speaker', 1);
+    `);
+
+    const organizerRoster = await service.listOrganizerSpeakerRoster(
+      organizationId,
+      eventId,
+      organizerAccountId,
+    );
+    expect(
+      organizerRoster.speakers.find((speaker) => speaker.participantId === marcus.participantId)
+        ?.sessions,
+    ).toEqual([
+      { sessionId: "lightning-session", title: "Lightning Talk", status: "accepted", version: 7 },
+    ]);
+    await expect(
+      service.listOrganizerSpeakerSessions(
+        organizationId,
+        eventId,
+        organizerAccountId,
+        marcus.participantId,
+      ),
+    ).resolves.toEqual([
+      { sessionId: "lightning-session", title: "Lightning Talk", status: "accepted", version: 7 },
+    ]);
+
+    await createAndAcceptSpeakerInvitation({
+      database: fixture.database as unknown as D1Database,
+      invitationId: "canonical-marcus-invitation",
+      creationIdempotencyKey: "canonical-marcus-invitation",
+      participantId: marcus.participantId,
+      accountId: marcusAccountId,
+      email: "marcus@example.test",
+      invitedAt: "2099-08-15T04:01:00.000Z",
+      acceptedAt: "2099-08-15T04:02:00.000Z",
+    });
+    await expect(service.getPortal(eventId, marcusAccountId)).resolves.toMatchObject({
+      sessions: [
+        { sessionId: "lightning-session", title: "Lightning Talk", status: "accepted", version: 7 },
+      ],
+    });
+    await expect(service.getPortal(eventId, priyaAccountId)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    await expect(service.getPortal(eventId, acceptedAccountId)).resolves.toMatchObject({
+      sessions: [],
+    });
+  });
 
   it("roundtrips organizer, participant, task, profile, and private-headshot state", async () => {
     const fixture = createSpeakerLifecycleFixture();
@@ -875,12 +966,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
           expect.objectContaining({
             participantId: acceptedParticipantId,
             status: "confirmed",
-            sessions: [
-              expect.objectContaining({
-                submissionId: `speaker-submission:${acceptedSubmissionId}`,
-                status: "accepted",
-              }),
-            ],
+            sessions: [],
           }),
         ]),
       );
@@ -1076,7 +1162,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
           title,
           description: `${title} before arrival.`,
           dueAt: "2100-01-01",
-          assignments: [{ participantId, submissionId: null }],
+          assignments: [{ participantId, subject: { type: "participant" } }],
         });
         const taskId = assigned.tasks[0]?.taskId;
         if (taskId === undefined) throw new Error("Expected a persisted general speaker task.");
@@ -1196,7 +1282,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
         kind: "headshot",
         state: "pending_upload",
       });
-      expect(authorization.asset.submissionId).toBeUndefined();
+      expect(authorization.asset.sessionId).toBeUndefined();
       const uploadCapability = privateCapabilityParts(authorization.grant.url);
       await service.consumeUploadCapability(
         uploadCapability.capabilityId,
@@ -1281,6 +1367,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
                     capabilityHash: await tokenDigest(legacyToken),
                     tenantId: organizationId,
                     eventId,
+                    subject: { kind: "participant" },
                     participantId: priyaParticipantId,
                     objectKey: uploadRow.object_key,
                     contentType: uploadRow.content_type,
@@ -1291,10 +1378,9 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
                 )}
           WHERE id = ${sqlString(headshotAssetId)};`,
       );
-      const legacyDownload = await service.consumeDownloadCapability(headshotAssetId, legacyToken);
-      expect(new Uint8Array(await new Response(legacyDownload.body).arrayBuffer())).toEqual(
-        headshotBytes,
-      );
+      await expect(
+        service.consumeDownloadCapability(headshotAssetId, legacyToken),
+      ).rejects.toMatchObject({ code: "CAPABILITY_INVALID" });
 
       const firstGrant = await service.issueOrganizerDownloadGrant({
         eventId,
@@ -1441,7 +1527,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       maxBytes: 1_000_000,
       acceptedAssetKinds: ["slides"],
       reminderOffsetsMinutes: [60],
-      assignments: [{ participantId, submissionId: null }],
+      assignments: [{ participantId, subject: { type: "participant" } }],
     });
     if (created === undefined) throw new Error("Expected a reminder task.");
 
@@ -1506,7 +1592,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       maxBytes: 1_000_000,
       acceptedAssetKinds: ["slides"],
       reminderOffsetsMinutes: [60],
-      assignments: [{ participantId, submissionId: null }],
+      assignments: [{ participantId, subject: { type: "participant" } }],
     });
     if (created === undefined) throw new Error("Expected a task CAS fixture.");
 
@@ -1584,7 +1670,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       acceptedAssetKinds: ["slides"],
       allowedMimeTypes: ["application/pdf"],
       maxBytes: 100_000,
-      assignments: [{ participantId, submissionId: null }],
+      assignments: [{ participantId, subject: { type: "participant" } }],
     });
     const taskId = assigned[0]?.id;
     if (taskId === undefined) throw new Error("Expected the assigned upload task.");
@@ -1764,7 +1850,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       acceptedAssetKinds: ["slides"],
       allowedMimeTypes: ["application/pdf"],
       maxBytes: 100_000,
-      assignments: [{ participantId, submissionId: null }],
+      assignments: [{ participantId, subject: { type: "participant" } }],
     });
     const task = assigned[0];
     if (task === undefined) throw new Error("Expected the assigned upload task.");
@@ -1879,7 +1965,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
         expect.objectContaining({
           id: task.id,
           participantId,
-          submissionId: null,
+          subject: { type: "participant", participantId },
           status: "needs_changes",
           version: submitted.task.version + 1,
         }),
@@ -1939,7 +2025,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       acceptedAssetKinds: ["slides"],
       allowedMimeTypes: ["application/pdf"],
       maxBytes: 100_000,
-      assignments: [{ participantId, submissionId: null }],
+      assignments: [{ participantId, subject: { type: "participant" } }],
     });
     if (task === undefined) throw new Error("Expected the stale review task.");
     const bytes = new TextEncoder().encode("stale-review-deck");
@@ -2416,7 +2502,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       title: "Confirm invitation details",
       description: "Review the speaker portal invitation.",
       dueAt: "2100-01-01",
-      assignments: [{ participantId, submissionId: null }],
+      assignments: [{ participantId, subject: { type: "participant" } }],
     });
     fixture.database.executeScript(`
       INSERT INTO session_statuses

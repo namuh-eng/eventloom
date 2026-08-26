@@ -75,6 +75,12 @@ export interface PortalSubmission {
   closeAt?: string;
   answers?: Readonly<Record<string, unknown>>;
 }
+export interface PortalSession {
+  sessionId: string;
+  title: string;
+  status: string;
+  version: number;
+}
 
 export interface PortalProfile {
   id: string;
@@ -93,11 +99,15 @@ export interface PortalProfile {
   updatedAt: string;
 }
 
+export type PortalTaskSubject = { type: "participant" } | { type: "session"; sessionId: string };
+
 export interface PortalTask {
   id: string;
   eventId: string;
-  submissionId: string | null;
   participantId: string;
+  subject: PortalTaskSubject;
+  /** Canonical program-session title projected for session-scoped tasks. */
+  sessionTitle?: string;
   type: PortalTaskType;
   owner: "speaker" | "organizer";
   title: string;
@@ -164,7 +174,7 @@ export interface PortalRosterEnvelope {
 export interface PortalAsset {
   id: string;
   eventId: string;
-  submissionId?: string;
+  sessionId?: string;
   participantId: string;
   taskId?: string;
   kind: PortalAssetKind;
@@ -195,6 +205,7 @@ export type PortalAssetHistoryEntry = PortalAsset;
 export interface PortalAssetComment {
   id: string;
   assetId: string;
+  versionId?: string;
   body: string;
   authorLabel: string;
   createdAt: string;
@@ -285,6 +296,7 @@ export interface PortalView {
   submissions: PortalSubmission[];
   profiles: PortalProfile[];
   tasks: PortalTask[];
+  sessions: PortalSession[];
   outstandingTaskCount: number;
   context?: PortalContext;
   capabilities?: readonly PortalCapability[];

@@ -26,6 +26,11 @@ import {
   loadCanonicalAgendaWorkspaceWithCache,
   serializeAgendaSuggestionOptions,
 } from "./agenda-workspace-model";
+import {
+  placementConflictsFromSaveResult,
+  RejectedPlacementConflicts,
+  recoverPlacementFailure,
+} from "./agenda-workspace-sections";
 import { AgendaApiError, createAgendaApi } from "./api";
 import type { AgendaPreview, AgendaWorkspaceData } from "./types";
 
@@ -433,6 +438,91 @@ describe("agenda organizer workspace", () => {
       ...authoritativeSavedPreview,
       conflicts: [...preview.conflicts, participantConflict],
     });
+  });
+  it("keeps a rejected placement's Priya and room conflicts inside the active editor", () => {
+    const savedEntries = data.draft.entries;
+    const candidateConflicts: AgendaPreview["conflicts"] = [
+      {
+        id: "conflict_room",
+        kind: "room",
+        entryIds: ["entry_keynote", "candidate_priya"],
+        message: "Room Main hall overlaps Systems that stay understandable.",
+      },
+      {
+        id: "conflict_participant",
+        kind: "participant",
+        entryIds: ["entry_keynote", "candidate_priya"],
+        message: "Speaker Priya Shah overlaps Systems that stay understandable in Main hall.",
+      },
+    ];
+
+    const markup = renderToStaticMarkup(
+      createElement(RejectedPlacementConflicts, { conflicts: candidateConflicts }),
+    );
+
+    expect(markup).toContain('aria-label="Rejected placement conflicts"');
+    expect(markup).toContain("Placement was not saved");
+    expect(markup).toContain("Priya Shah");
+    expect(markup).toContain("Main hall");
+    expect(markup).toContain("The private draft has not changed.");
+    expect(data.draft.entries).toBe(savedEntries);
+    expect(data.draft.entries).toEqual([baseEntry]);
+  });
+  it("does not reuse global preview conflicts for an unrelated failed placement", () => {
+    const candidateConflicts: AgendaPreview["conflicts"] = [
+      {
+        id: "candidate-409",
+        kind: "participant",
+        entryIds: ["entry_keynote", "candidate_priya"],
+        message: "Speaker Priya Shah overlaps in Main hall.",
+      },
+    ];
+
+    expect(placementConflictsFromSaveResult({ saved: false, candidateConflicts })).toEqual(
+      candidateConflicts,
+    );
+    expect(placementConflictsFromSaveResult(false)).toEqual([]);
+    expect(placementConflictsFromSaveResult(undefined)).toEqual([]);
+  });
+  it("retains candidate conflict diagnostics when authoritative recovery fails", async () => {
+    const candidateConflicts: AgendaPreview["conflicts"] = [
+      {
+        id: "candidate-409",
+        kind: "participant",
+        entryIds: ["entry_keynote", "candidate_priya"],
+        message: "Speaker Priya Shah overlaps in Main hall.",
+      },
+    ];
+    const error = new AgendaApiError("CONFLICT", "Placement rejected.", 409, undefined, undefined, {
+      evaluated: true,
+      report: { conflicts: candidateConflicts, warnings: [] },
+      authoritativeSavedPreview: { ...preview, conflicts: [] },
+    });
+    let returnedConflicts: AgendaPreview["conflicts"] = [];
+    let recoveryError: unknown;
+    const recover = vi.fn(async () => {
+      throw new Error("Authoritative agenda recovery failed.");
+    });
+
+    await recoverPlacementFailure(
+      error,
+      recover,
+      (conflicts) => {
+        returnedConflicts = conflicts;
+      },
+      (failure) => {
+        recoveryError = failure;
+      },
+    );
+
+    expect(recover).toHaveBeenCalledOnce();
+    expect(returnedConflicts).toEqual(candidateConflicts);
+    expect(recoveryError).toMatchObject({ message: "Authoritative agenda recovery failed." });
+    expect(
+      renderToStaticMarkup(
+        createElement(RejectedPlacementConflicts, { conflicts: returnedConflicts }),
+      ),
+    ).toContain("Priya Shah");
   });
 
   it("links the agenda back to the organization-scoped event overview", () => {

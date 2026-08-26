@@ -22,6 +22,40 @@ test("participant-only accounts enter CFP without organizer context controls", a
   await expect(page.getByRole("button", { name: "Continue to proposal" })).toBeEnabled();
 });
 
+test("welcome enters Account without claiming or creating a draft", async ({
+  page,
+  authSession,
+}) => {
+  const eventId = "welcome-navigation";
+  await installCfpApi(page, authSession, {
+    eventId,
+    initiallyAuthenticated: true,
+    memberships: [],
+  });
+  const mutationRequests: Request[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/cfp/") && request.method() !== "GET") {
+      mutationRequests.push(request);
+    }
+  });
+
+  await page.goto(`/cfp/organizations/evaluator-org/events/${eventId}`);
+  const continueLink = page.getByRole("link", { name: "Continue →" });
+  await expect(continueLink).toHaveAttribute(
+    "href",
+    `/cfp/organizations/evaluator-org/events/${eventId}/account`,
+  );
+  await expect(page.getByText("Draft saved", { exact: true })).toHaveCount(0);
+
+  await Promise.all([
+    page.waitForURL(new RegExp(`/cfp/organizations/evaluator-org/events/${eventId}/account$`)),
+    continueLink.click(),
+  ]);
+
+  expect(mutationRequests).toEqual([]);
+  await expect(page.getByRole("button", { name: "Continue to proposal" })).toBeEnabled();
+});
+
 test("authenticated Account continuation stays locked while the draft opens", async ({
   page,
   authSession,
@@ -34,7 +68,7 @@ test("authenticated Account continuation stays locked while the draft opens", as
   const draftCreationStarted = new Promise<void>((resolve) => {
     signalDraftCreation = resolve;
   });
-  await installCfpApi(page, authSession, {
+  const harness = await installCfpApi(page, authSession, {
     eventId: "authenticated-pending-context",
     initiallyAuthenticated: true,
     memberships: [],
@@ -56,11 +90,23 @@ test("authenticated Account continuation stays locked while the draft opens", as
   const submit = page.getByRole("button", { name: "Continue to proposal" }).click();
   await draftCreationStarted;
   await expect(page.getByRole("button", { name: "Continuing…" })).toBeDisabled();
+  const pointerKey = `eventloom:cfp-submission:v1:evaluator-org:authenticated-pending-context:${encodeURIComponent(harness.form.id)}`;
+  const activeKey = `eventloom:cfp-active-submission:v1:evaluator-org:authenticated-pending-context:${encodeURIComponent(harness.form.id)}`;
+  await page.evaluate(({ key, value }) => window.localStorage.setItem(key, value), {
+    key: pointerKey,
+    value: "submission-selected-in-other-tab",
+  });
 
   const submissionNavigation = page.waitForURL(new RegExp(`${submissionPath}$`));
   releaseDraftCreation();
   await submit;
   await submissionNavigation;
+  expect(await page.evaluate((key) => window.localStorage.getItem(key), pointerKey)).toBe(
+    "submission-selected-in-other-tab",
+  );
+  expect(await page.evaluate((key) => window.sessionStorage.getItem(key), activeKey)).toBe(
+    harness.submission.id,
+  );
 });
 
 test("current-organization organizers confirm the CFP applicant context", async ({
@@ -302,7 +348,7 @@ test("submitter completes the account-first CFP with two participants", async ({
   await expect(
     page.getByRole("heading", { level: 1, name: "Welcome to our event!" }),
   ).toBeVisible();
-  const continueButton = page.getByRole("button", { name: "Continue →" });
+  const continueButton = page.getByRole("link", { name: "Continue →" });
   await continueButton.focus();
   await expect(continueButton).toBeFocused();
   await Promise.all([
@@ -401,9 +447,9 @@ test("submitter completes the account-first CFP with two participants", async ({
   await selectSearchable(page, "Format", "Breakout Session");
   const tagsSearch = page.getByLabel("Search Tags options");
   await tagsSearch.fill("Leadership");
-  const leadershipTag = page.getByRole("checkbox", { name: "Leadership", exact: true });
-  await leadershipTag.check();
-  await expect(leadershipTag).toBeChecked();
+  const leadershipTag = page.getByRole("option", { name: "Leadership", exact: true });
+  await leadershipTag.click();
+  await expect(tagsSearch).toHaveValue("");
   await selectSearchable(page, "Track", "Track 2");
   await selectSearchable(page, "Level", "Advanced");
   await selectSearchable(page, "Language", "English");
@@ -447,7 +493,7 @@ test("submitter completes the account-first CFP with two participants", async ({
     page.getByText("Thank you for contributing to the program.", { exact: true }),
   ).toBeVisible();
 
-  const statusDashboard = page.getByRole("button", { name: "View submission status dashboard" });
+  const statusDashboard = page.getByRole("button", { name: "View submission" });
   await Promise.all([
     page.waitForURL(/\/portal\/submissions\?event=evt_evaluator_2026$/),
     statusDashboard.click(),
@@ -694,7 +740,7 @@ test("CFP shell reflows without clipping and exposes the current step", async ({
   );
   expect(fitsViewport).toBe(true);
 
-  const continueButton = page.getByRole("button", { name: "Continue →" });
+  const continueButton = page.getByRole("link", { name: "Continue →" });
   await Promise.all([
     page.waitForURL(/\/cfp\/organizations\/evaluator-org\/events\/mobile-progress\/account$/),
     continueButton.click(),
@@ -1106,7 +1152,7 @@ interface DynamicCfpSubmission {
   ownerAccountId: string;
   formVersion: number;
   version: number;
-  status: "draft" | "submitted";
+  status: "draft" | "submitted" | "withdrawn";
   completedSteps: string[];
   answers: Record<string, unknown>;
   participants: DynamicCfpParticipant[];
@@ -1130,8 +1176,13 @@ interface DynamicCfpHarness {
 
 interface DynamicCfpHarnessOptions {
   stalePointer?: boolean;
+  unauthorizedPointerOnce?: boolean;
+  unauthenticatedStartup?: boolean;
+  unauthorizedPointerAlways?: boolean;
   conflictOnDraftPatch?: number;
   initialAnswers?: Record<string, unknown>;
+  withdrawnPointer?: boolean;
+  replacementPointer?: string;
 }
 
 function cfpRecord(value: unknown): Record<string, unknown> | null {
@@ -1199,7 +1250,7 @@ async function installDynamicCfpApi(
     ownerAccountId: session.userId,
     formVersion: CFP_FORM_VERSION,
     version: 1,
-    status: "draft",
+    status: options.withdrawnPointer ? "withdrawn" : "draft",
     completedSteps: ["welcome"],
     answers: cloneCfp(
       options.initialAnswers ?? {
@@ -1212,6 +1263,12 @@ async function installDynamicCfpApi(
     updatedAt: CFP_UPDATED_AT,
   };
   let draftPatchCount = 0;
+  let authenticated = !options.unauthenticatedStartup;
+  let unauthorizedPointerLoadsRemaining = options.unauthorizedPointerAlways
+    ? Number.POSITIVE_INFINITY
+    : options.unauthorizedPointerOnce
+      ? 1
+      : 0;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -1231,7 +1288,31 @@ async function installDynamicCfpApi(
       return;
     }
     if (request.method() === "GET" && url.pathname === "/api/auth/get-session") {
-      await route.fallback();
+      if (!authenticated) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "null" });
+      } else if (options.unauthenticatedStartup) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            session: {
+              id: session.token,
+              userId: session.userId,
+              expiresAt: "2099-01-01T00:00:00.000Z",
+            },
+            user: {
+              id: session.userId,
+              email: session.email,
+              name: session.displayName,
+              emailVerified: true,
+            },
+            memberships: [],
+            speakerGrants: [],
+          }),
+        });
+      } else {
+        await route.fallback();
+      }
       return;
     }
     expect(request.headers().cookie).toContain(`${E2E_SESSION_COOKIE}=${session.token}`);
@@ -1240,15 +1321,28 @@ async function installDynamicCfpApi(
       request.method() === "POST" &&
       (url.pathname === "/api/auth/sign-in/email" || url.pathname === "/api/auth/sign-up/email")
     ) {
-      await fulfillCfpJson(route, {
-        token: session.token,
-        user: {
-          id: session.userId,
-          email: session.email,
-          name: session.displayName,
-          emailVerified: true,
+      authenticated = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: {
+          "set-cookie": `${E2E_SESSION_COOKIE}=${session.token}; Path=/; HttpOnly; SameSite=Lax`,
         },
+        body: JSON.stringify({
+          token: session.token,
+          user: {
+            id: session.userId,
+            email: session.email,
+            name: session.displayName,
+            emailVerified: true,
+          },
+        }),
       });
+      return;
+    }
+    if (request.method() === "POST" && url.pathname === "/api/auth/sign-out") {
+      authenticated = false;
+      await route.fulfill({ status: 204 });
       return;
     }
 
@@ -1268,12 +1362,22 @@ async function installDynamicCfpApi(
       return;
     }
 
+    const draftSubmissionId = url.pathname.match(/\/submissions\/([^/]+)\/draft$/u)?.[1];
     if (
       request.method() === "GET" &&
-      url.pathname.startsWith(`${apiPath}/`) &&
-      url.pathname.endsWith(`/submissions/${CFP_SUBMISSION_ID}/draft`)
+      draftSubmissionId !== undefined &&
+      (draftSubmissionId === CFP_SUBMISSION_ID || draftSubmissionId === options.replacementPointer)
     ) {
       draftLoads.push(request);
+      if (unauthorizedPointerLoadsRemaining > 0) {
+        unauthorizedPointerLoadsRemaining -= 1;
+        await route.fulfill({
+          status: 401,
+          contentType: "application/json",
+          body: cfpErrorBody("UNAUTHORIZED", "Authentication is required."),
+        });
+        return;
+      }
       if (options.stalePointer) {
         await route.fulfill({
           status: 404,
@@ -1288,12 +1392,20 @@ async function installDynamicCfpApi(
         });
         return;
       }
-      await fulfillCfpJson(route, cloneCfp(submission));
+      await fulfillCfpJson(
+        route,
+        cloneCfp(
+          draftSubmissionId === options.replacementPointer
+            ? { ...submission, id: draftSubmissionId, status: "draft" as const }
+            : submission,
+        ),
+      );
       return;
     }
 
     if (request.method() === "POST" && url.pathname === `${apiPath}/forms/${CFP_FORM_ID}/drafts`) {
       submission.version = 1;
+      submission.status = "draft";
       await fulfillCfpJson(route, cloneCfp(submission), 201);
       return;
     }
@@ -1441,6 +1553,12 @@ async function installDynamicCfpApi(
 function pointerKey(): string {
   return `eventloom:cfp-submission:v1:${encodeURIComponent(CFP_ORGANIZATION_ID)}:${encodeURIComponent(CFP_EVENT_ID)}:${encodeURIComponent(CFP_FORM_ID)}`;
 }
+function activePointerKey(): string {
+  return `eventloom:cfp-active-submission:v1:${encodeURIComponent(CFP_ORGANIZATION_ID)}:${encodeURIComponent(CFP_EVENT_ID)}:${encodeURIComponent(CFP_FORM_ID)}`;
+}
+function newSubmissionIntentKey(): string {
+  return `eventloom:cfp-new-submission:v1:${encodeURIComponent(CFP_ORGANIZATION_ID)}:${encodeURIComponent(CFP_EVENT_ID)}:${encodeURIComponent(CFP_FORM_ID)}`;
+}
 
 function cfpMutationBody(request: import("@playwright/test").Request): Record<string, unknown> {
   const body = request.postDataJSON();
@@ -1462,7 +1580,7 @@ test("published dynamic CFP keeps conditional sections, custom answers, and sche
     .filter({ visible: true });
   await expect(visibleProposalLimit).toHaveCount(1);
   await expect(page.getByText(CFP_FORM.welcomeContent, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Continue →" }).click();
+  await page.getByRole("link", { name: "Continue →" }).click();
   await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/account$`));
 
   await page.getByLabel("Email address").fill("cfp-e2e@example.test");
@@ -1489,7 +1607,7 @@ test("published dynamic CFP keeps conditional sections, custom answers, and sche
   await selectSearchable(page, "Track", "Platform");
   const topicsSearch = page.getByPlaceholder("Search options…");
   await topicsSearch.fill("Access");
-  await page.getByLabel("Accessibility", { exact: true }).check();
+  await page.getByRole("option", { name: "Accessibility", exact: true }).click();
   await expect(page.getByRole("heading", { level: 2, name: "Workshop details" })).toBeVisible();
   await page.getByLabel("Workshop audience").fill("Staff engineers and platform teams.");
   await expect(page.getByLabel("Final slides")).toBeVisible();
@@ -1535,9 +1653,7 @@ test("published dynamic CFP keeps conditional sections, custom answers, and sche
   await expect(page.getByText(CFP_FORM.settings.successContent, { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit submission" })).toBeVisible();
   await expect(page.getByText(/Eventloom Conference received your proposal\./)).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "View submission status dashboard" }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "View submission" })).toBeVisible();
   const completedProgress = page
     .getByRole("navigation", { name: "Submission progress" })
     .filter({ visible: true });
@@ -1580,8 +1696,12 @@ test("published dynamic CFP keeps conditional sections, custom answers, and sche
   await page.setViewportSize({ height: 900, width: 1440 });
   const submittedSnapshot = cloneCfp(harness.submission);
   const submittedEditRequestIndex = harness.requests.length;
+  await page.evaluate((key) => window.sessionStorage.setItem(key, "1"), newSubmissionIntentKey());
   await page.getByRole("button", { name: "Edit submission" }).click();
   await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/submission$`));
+  expect(
+    await page.evaluate((key) => window.sessionStorage.getItem(key), newSubmissionIntentKey()),
+  ).toBeNull();
   await page.getByRole("button", { name: "Back" }).click();
   await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/account$`));
   await expect(page.getByLabel("Email address")).toHaveValue("cfp-e2e@example.test");
@@ -1734,6 +1854,205 @@ test("CFP rejects a stale draft version without abandoning the five-step session
   expect(harness.submission.formVersion).toBe(CFP_FORM_VERSION);
 });
 
+test("CFP resumes an authentication-protected saved draft without creating a replacement", async ({
+  authSession,
+  page,
+}) => {
+  const harness = await installDynamicCfpApi(page, authSession, {
+    unauthorizedPointerOnce: true,
+    unauthenticatedStartup: true,
+  });
+  const key = pointerKey();
+  await page.addInitScript(
+    (pointer) => {
+      window.localStorage.setItem(pointer.key, pointer.value);
+    },
+    { key, value: CFP_SUBMISSION_ID },
+  );
+
+  await page.goto(`${CFP_PATH}/account`);
+  await expect(
+    page.getByText("Sign in with the account that owns this saved draft.", { exact: true }),
+  ).toBeVisible();
+  await page.locator('[data-cfp-account-mode="sign_in"]').click();
+  await page.getByLabel("Email address").fill(authSession.email);
+  await page.getByLabel("Password").fill("StrongPass1!");
+  await page.getByRole("button", { name: "Sign in and continue" }).click();
+
+  await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/submission$`));
+  expect(harness.draftLoads.length).toBeGreaterThanOrEqual(2);
+  const authenticationIndex = harness.requests.findIndex(
+    (request) => request.method() === "POST" && request.url().endsWith("/api/auth/sign-in/email"),
+  );
+  const postAuthenticationLoadIndex = harness.requests.findIndex(
+    (request, index) =>
+      index > authenticationIndex &&
+      request.method() === "GET" &&
+      request.url().endsWith(`/submissions/${CFP_SUBMISSION_ID}/draft`),
+  );
+  const pinnedSaveIndex = harness.requests.findIndex(
+    (request) =>
+      request.method() === "PATCH" &&
+      request.url().endsWith(`/submissions/${CFP_SUBMISSION_ID}/draft`),
+  );
+  expect(authenticationIndex).toBeGreaterThan(-1);
+  expect(postAuthenticationLoadIndex).toBeGreaterThan(authenticationIndex);
+  expect(pinnedSaveIndex).toBeGreaterThan(postAuthenticationLoadIndex);
+  expect(
+    harness.requests.filter(
+      (request) =>
+        request.method() === "POST" && request.url().endsWith(`/forms/${CFP_FORM_ID}/drafts`),
+    ),
+  ).toHaveLength(0);
+  expect(await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), key)).toBe(
+    CFP_SUBMISSION_ID,
+  );
+});
+test("CFP keeps each tab bound to its hydrated proposal across step remounts", async ({
+  authSession,
+  context,
+  page,
+}) => {
+  const harness = await installDynamicCfpApi(page, authSession);
+  const localKey = pointerKey();
+  const tabKey = activePointerKey();
+  await page.goto("/");
+  await page.evaluate(({ key, value }) => window.localStorage.setItem(key, value), {
+    key: localKey,
+    value: CFP_SUBMISSION_ID,
+  });
+
+  await page.goto(`${CFP_PATH}/submission`);
+  await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/submission$`));
+  expect(await page.evaluate((key) => window.sessionStorage.getItem(key), tabKey)).toBe(
+    CFP_SUBMISSION_ID,
+  );
+
+  const otherTab = await context.newPage();
+  await otherTab.goto("/");
+  await otherTab.evaluate(({ key, value }) => window.localStorage.setItem(key, value), {
+    key: localKey,
+    value: "submission-selected-in-other-tab",
+  });
+  await otherTab.close();
+
+  await page.goto(`${CFP_PATH}/participants`);
+  await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/participants$`));
+  expect(harness.draftLoads.length).toBeGreaterThanOrEqual(2);
+  expect(
+    harness.draftLoads.every((request) =>
+      request.url().endsWith(`/submissions/${CFP_SUBMISSION_ID}/draft`),
+    ),
+  ).toBe(true);
+  expect(await page.evaluate((key) => window.localStorage.getItem(key), localKey)).toBe(
+    "submission-selected-in-other-tab",
+  );
+  expect(await page.evaluate((key) => window.sessionStorage.getItem(key), tabKey)).toBe(
+    CFP_SUBMISSION_ID,
+  );
+});
+test("CFP lets a wrong account explicitly sign out before switching to a protected draft owner", async ({
+  authSession,
+  page,
+}) => {
+  const harness = await installDynamicCfpApi(page, authSession, {
+    unauthorizedPointerAlways: true,
+    unauthenticatedStartup: true,
+  });
+  const key = pointerKey();
+  await page.addInitScript(
+    (pointer) => {
+      window.localStorage.setItem(pointer.key, pointer.value);
+    },
+    { key, value: CFP_SUBMISSION_ID },
+  );
+
+  await page.goto(`${CFP_PATH}/account`);
+  await page.getByLabel("Email address").fill(authSession.email);
+  await page.getByLabel("Password").fill("StrongPass1!");
+  await page.getByRole("button", { name: "Sign in and continue" }).click();
+
+  await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/account$`));
+  await expect(page.getByRole("button", { name: "Sign out and switch account" })).toBeVisible();
+  await page.getByRole("button", { name: "Sign out and switch account" }).click();
+  await expect(page).toHaveURL(/\/login\?next=/u);
+  expect(
+    harness.requests.filter(
+      (request) =>
+        (request.method() === "POST" && request.url().endsWith(`/forms/${CFP_FORM_ID}/drafts`)) ||
+        (request.method() === "PATCH" &&
+          request.url().endsWith(`/submissions/${CFP_SUBMISSION_ID}/draft`)),
+    ),
+  ).toHaveLength(0);
+  expect(await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), key)).toBe(
+    CFP_SUBMISSION_ID,
+  );
+});
+test("CFP releases a matching withdrawn pointer so an authenticated account can create a replacement", async ({
+  authSession,
+  page,
+}) => {
+  const harness = await installDynamicCfpApi(page, authSession, {
+    unauthenticatedStartup: true,
+    withdrawnPointer: true,
+  });
+  const key = pointerKey();
+  await page.addInitScript(
+    (pointer) => {
+      window.localStorage.setItem(pointer.key, pointer.value);
+    },
+    { key, value: CFP_SUBMISSION_ID },
+  );
+
+  await page.goto(`${CFP_PATH}/account`);
+  await page.getByLabel("Email address").fill(authSession.email);
+  await page.getByLabel("Password").fill("StrongPass1!");
+  await page.getByRole("button", { name: "Sign in and continue" }).click();
+  await expect(page).toHaveURL(new RegExp(`${CFP_PATH}/submission$`));
+  expect(
+    harness.requests.filter(
+      (request) =>
+        request.method() === "POST" && request.url().endsWith(`/forms/${CFP_FORM_ID}/drafts`),
+    ),
+  ).toHaveLength(1);
+  expect(await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), key)).toBe(
+    CFP_SUBMISSION_ID,
+  );
+});
+test("CFP preserves a newer pointer selected while a withdrawn draft is loading", async ({
+  authSession,
+  page,
+}) => {
+  const replacementPointer = "submission-selected-in-other-tab";
+  await installDynamicCfpApi(page, authSession, {
+    replacementPointer,
+    unauthenticatedStartup: true,
+    withdrawnPointer: true,
+  });
+  const key = pointerKey();
+  await page.addInitScript(
+    (pointer) => {
+      window.localStorage.setItem(pointer.key, pointer.value);
+    },
+    { key, value: CFP_SUBMISSION_ID },
+  );
+  await page.route(`**/submissions/${CFP_SUBMISSION_ID}/draft`, async (route) => {
+    await page.evaluate(
+      ({ storageKey, replacement }) => window.localStorage.setItem(storageKey, replacement),
+      { storageKey: key, replacement: replacementPointer },
+    );
+    await route.fallback();
+  });
+
+  await page.goto(`${CFP_PATH}/account`);
+  await page.getByLabel("Email address").fill(authSession.email);
+  await page.getByLabel("Password").fill("StrongPass1!");
+  await page.getByRole("button", { name: "Sign in and continue" }).click();
+  await expect(page.getByLabel("Email address")).toHaveValue(authSession.email);
+  expect(await page.evaluate((storageKey) => window.localStorage.getItem(storageKey), key)).toBe(
+    replacementPointer,
+  );
+});
 test("CFP clears a stale saved pointer and starts a fresh account step", async ({
   authSession,
   page,

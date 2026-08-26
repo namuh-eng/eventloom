@@ -120,6 +120,7 @@ import type {
   SpeakerAssetAuditEntry,
   SpeakerAssetComment,
   SpeakerAssetReviewCommand,
+  SpeakerCanonicalSession,
   SpeakerContentHistoryEntry,
   SpeakerContentRecord,
   SpeakerEventResource,
@@ -560,6 +561,13 @@ export class LocalSpeakerRepository
     Awaited<ReturnType<SpeakerOrganizerLifecycleRepository["saveOrganizerSpeakerImportPreview"]>>
   >();
   readonly #aggregateOperations = new Map<string, { digest: string; participantIds: string[] }>();
+  #canonicalSessionReader?: (eventId: string) => Promise<readonly SpeakerCanonicalSession[]>;
+
+  setCanonicalSessionReader(
+    reader: (eventId: string) => Promise<readonly SpeakerCanonicalSession[]>,
+  ): void {
+    this.#canonicalSessionReader = reader;
+  }
 
   constructor(
     private readonly invitationRecipientForEmail: (
@@ -758,6 +766,11 @@ export class LocalSpeakerRepository
       },
     ];
   }
+  async listPortalCanonicalSessions(): Promise<readonly SpeakerCanonicalSession[]> {
+    // Local CFP contexts are not explicit speaker invitations, so they confer no session access.
+    return [];
+  }
+
   async getOrganizerAccessScope(eventId: string, accountId: string) {
     if (accountId !== LOCAL_ORGANIZER_ACCOUNT_ID) return null;
     this.#ensureEvent(eventId);
@@ -795,6 +808,10 @@ export class LocalSpeakerRepository
   ): Promise<SpeakerOrganizerReadModel | null> {
     const scope = await this.getOrganizerAccessScope(eventId, accountId);
     if (scope === null) return null;
+    if (this.#canonicalSessionReader === undefined) {
+      throw new Error("Canonical session reader unavailable");
+    }
+    const canonicalSessions = await this.#canonicalSessionReader(eventId);
     const submissions = await this.listSubmissions(eventId, scope.submissionIds);
     const profiles = resources.profiles === true ? clone(this.#profiles.get(eventId) ?? []) : [];
     const tasks = resources.tasks === true ? clone(this.#tasks.get(eventId) ?? []) : [];
@@ -833,7 +850,7 @@ export class LocalSpeakerRepository
         updatedAt: profile.updatedAt,
       };
     });
-    return { scope, submissions, roster, profiles, tasks, assets };
+    return { scope, submissions, roster, profiles, tasks, assets, canonicalSessions };
   }
 
   async resolveEventParticipant(
@@ -1085,14 +1102,13 @@ export class LocalSpeakerRepository
     const submission = (this.#submissions.get(eventId) ?? []).find(({ participantIds }) =>
       participantIds.includes(participantId),
     );
-    if (submission === undefined) return;
     this.#cfpPortalContexts.set(accountId, {
       id: `portal:${LOCAL_ORGANIZATION_ID}:${eventId}:${participantId}`,
       eventId,
       name: eventId,
       slug: eventId,
       capabilities: [...LOCAL_SPEAKER_CAPABILITIES],
-      submissionIds: [submission.id],
+      submissionIds: submission === undefined ? [] : [submission.id],
       participantIds: [participantId],
       primaryParticipantId: participantId,
     });
@@ -1195,7 +1211,9 @@ export class LocalSpeakerRepository
     this.#ensureEvent(eventId);
     const allowed = new Set(participantIds);
     return clone(
-      (this.#tasks.get(eventId) ?? []).filter(({ participantId }) => allowed.has(participantId)),
+      (this.#tasks.get(eventId) ?? [])
+        .filter(({ participantId }) => allowed.has(participantId))
+        .map((task) => ({ ...task, tenantId: LOCAL_ORGANIZATION_ID })),
     );
   }
 
@@ -1213,13 +1231,18 @@ export class LocalSpeakerRepository
 
   async getTask(eventId: string, taskId: string) {
     this.#ensureEvent(eventId);
-    return clone(this.#tasks.get(eventId)?.find(({ id }) => id === taskId) ?? null);
+    const task = this.#tasks.get(eventId)?.find(({ id }) => id === taskId);
+    return task === undefined ? null : clone({ ...task, tenantId: LOCAL_ORGANIZATION_ID });
   }
 
   async getTasksByIds(eventId: string, taskIds: readonly string[]) {
     this.#ensureEvent(eventId);
     const allowed = new Set(taskIds);
-    return clone((this.#tasks.get(eventId) ?? []).filter(({ id }) => allowed.has(id)));
+    return clone(
+      (this.#tasks.get(eventId) ?? [])
+        .filter(({ id }) => allowed.has(id))
+        .map((task) => ({ ...task, tenantId: LOCAL_ORGANIZATION_ID })),
+    );
   }
 
   async transitionTask(command: TransitionSpeakerTaskCommand) {
@@ -1681,6 +1704,20 @@ type LocalPrivateAssetObject = {
   readonly bytes: Uint8Array;
 };
 
+function samePrivateAssetSubject(
+  left: PrivateAssetCapabilityBinding["subject"],
+  right: PrivateAssetCapabilityBinding["subject"],
+): boolean {
+  return (
+    left.kind === right.kind &&
+    (left.kind === "cfp_submission"
+      ? right.kind === "cfp_submission" && left.submissionId === right.submissionId
+      : left.kind === "speaker_session"
+        ? right.kind === "speaker_session" && left.sessionId === right.sessionId
+        : true)
+  );
+}
+
 function sameUploadBinding(
   left: PrivateAssetCapabilityBinding,
   right: PrivateAssetCapabilityBinding,
@@ -1689,7 +1726,7 @@ function sameUploadBinding(
     left.capabilityId === right.capabilityId &&
     left.tenantId === right.tenantId &&
     left.eventId === right.eventId &&
-    left.submissionId === right.submissionId &&
+    samePrivateAssetSubject(left.subject, right.subject) &&
     left.participantId === right.participantId &&
     left.objectKey === right.objectKey &&
     left.fileName === right.fileName &&
@@ -1980,7 +2017,7 @@ class LocalPrivateAssetGateway implements PrivateAssetGateway {
     return (
       left.tenantId === right.tenantId &&
       left.eventId === right.eventId &&
-      left.submissionId === right.submissionId &&
+      samePrivateAssetSubject(left.subject, right.subject) &&
       left.participantId === right.participantId &&
       left.taskId === right.taskId &&
       left.objectKey === right.objectKey &&
@@ -2014,7 +2051,7 @@ class LocalPrivateAssetGateway implements PrivateAssetGateway {
       binding.capabilityId,
       binding.tenantId,
       binding.eventId,
-      binding.submissionId,
+      binding.subject,
       binding.participantId,
       binding.taskId ?? "",
       binding.objectKey,
@@ -3083,6 +3120,19 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
   const sessionRepository = new LocalSessionRepository(speakerRepository, (fence) =>
     localDecisionFenceChecker(fence),
   );
+  speakerRepository.setCanonicalSessionReader(async (eventId) =>
+    (await sessionRepository.listSessions(LOCAL_ORGANIZATION_ID, eventId))
+      .filter((session) => session.status.trim().toLowerCase() === "accepted")
+      .flatMap((session) =>
+        session.speakerIds.map((participantId) => ({
+          participantId,
+          sessionId: session.id,
+          title: session.title,
+          status: session.status,
+          version: session.version,
+        })),
+      ),
+  );
   const deterministicAgendaSuggestions = new DeterministicAgendaSuggestionProvider();
   const agendaMutationLock = new InMemoryAgendaMutationLock();
   const agendaEngine = localAgendaEngine(
@@ -3445,7 +3495,7 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
         reminderOffsetsMinutes: [10_080, 1_440],
         assignments: material.participants.map((participant) => ({
           participantId: participant.id,
-          submissionId: material.id,
+          subject: { type: "session", sessionId: `session-${material.id}` },
         })),
         ...(input.decisionFence === undefined ? {} : { decisionFence: input.decisionFence }),
       });
@@ -3694,6 +3744,10 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
     },
   );
   speakerService = new SpeakerService(speakerRepository, privateAssetGateway, {
+    sessionAuthority: {
+      getSession: (organizationId, eventId, sessionId) =>
+        sessionRepository.getSession(organizationId, eventId, sessionId),
+    },
     speakerSender: LOCAL_COMMUNICATION_SENDERS.speakers,
     eventTemporalSource: {
       async getEventTemporalContext(organizationId, eventId) {
@@ -4206,9 +4260,10 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
         : speakerHeadshots.get(event.slug)?.get(servedProjectionId);
     const headshots =
       trigger === "approved-content-change" && servedHeadshots !== undefined
-        ? new Map(
-            [...servedHeadshots].filter(([participantId]) => speakerSessions.has(participantId)),
-          )
+        ? new Map([
+            ...[...servedHeadshots].filter(([participantId]) => speakerSessions.has(participantId)),
+            ...selectedHeadshots,
+          ])
         : selectedHeadshots;
     const speakers =
       trigger === "approved-content-change" && servedSpeakers !== undefined
@@ -4457,18 +4512,23 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
               : { capabilitiesByParticipant: scope.capabilitiesByParticipant }),
           };
         },
-        async listSubmissions(organizationId, eventId, submissionIds) {
-          const submissions = await speakerRepository.listSubmissionsForOrganization(
-            organizationId,
-            eventId,
-            submissionIds,
-          );
-          return submissions.map((submission) => ({
-            organizationId: submission.tenantId,
-            eventId: submission.eventId,
-            submissionId: submission.id,
-            participantIds: submission.participantIds,
-          }));
+        async listSessions(organizationId: string, eventId: string, sessionIds: readonly string[]) {
+          await programGraphSeeded;
+          const requestedSessionIds = new Set(sessionIds);
+          return (await sessionRepository.listSessions(organizationId, eventId))
+            .filter(
+              (session) =>
+                session.tenantId === organizationId &&
+                session.eventId === eventId &&
+                requestedSessionIds.has(session.id),
+            )
+            .map((session) => ({
+              tenantId: session.tenantId,
+              eventId: session.eventId,
+              sessionId: session.id,
+              status: session.status,
+              speakerIds: session.speakerIds,
+            }));
         },
         async listTasks(organizationId, eventId, participantIds) {
           const tasks = await speakerRepository.listTasksForOrganization(
@@ -4476,22 +4536,17 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
             eventId,
             participantIds,
           );
-          return tasks.map((task) => {
-            const submissionId = task.submissionId?.startsWith("speaker-submission:")
-              ? task.submissionId.slice("speaker-submission:".length)
-              : task.submissionId;
-            return {
-              organizationId: task.tenantId,
-              eventId: task.eventId,
-              taskId: task.id,
-              submissionId,
-              participantId: task.participantId,
-              owner: task.owner,
-              title: task.title,
-              dueAt: task.dueAt ?? task.dueDate ?? null,
-              status: task.status,
-            };
-          });
+          return tasks.map((task) => ({
+            organizationId: task.tenantId,
+            eventId: task.eventId,
+            taskId: task.id,
+            sessionId: task.subject.type === "session" ? task.subject.sessionId : null,
+            participantId: task.participantId,
+            owner: task.owner,
+            title: task.title,
+            dueAt: task.dueAt ?? task.dueDate ?? null,
+            status: task.status,
+          }));
         },
       },
       reviewerWorkspace: {
@@ -4581,6 +4636,12 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
         await fixtureGraphReady;
         const event = await eventRepository.getEvent(LOCAL_ORGANIZATION_ID, eventId);
         return event?.organizationId ?? null;
+      },
+      async agendaCatalogForEvent(eventId) {
+        await fixtureGraphReady;
+        const event = await eventRepository.getEvent(LOCAL_ORGANIZATION_ID, eventId);
+        if (event === null) throw new Error(`Event ${eventId} was not found.`);
+        return sessionService.getAgendaCatalog(event.organizationId, eventId);
       },
       async eventMetadataForEvent(eventId) {
         await fixtureGraphReady;

@@ -24,6 +24,7 @@ import {
 } from "./cfp-wizard-model";
 import {
   clearCfpSubmissionState,
+  getCfpActiveSubmissionStorageKey,
   getCfpDraftStorageKey,
   getCfpSubmissionPointerStorageKey,
 } from "./draft-persistence";
@@ -39,6 +40,7 @@ const cfpWizardSectionsSource = readFileSync(
   new URL("./cfp-wizard-sections.tsx", import.meta.url),
   "utf8",
 );
+const cfpWizardSource = readFileSync(new URL("./cfp-wizard.tsx", import.meta.url), "utf8");
 
 describe("CFP flow", () => {
   it("matches server URL validation for absolute HTTP and HTTPS values", () => {
@@ -72,6 +74,24 @@ describe("CFP flow", () => {
     expect(cfpWizardSectionsSource).not.toContain(
       '<a href="/login?next=%2Fportal%2Fsubmissions">Use another account</a>',
     );
+  });
+  it("navigates from welcome to account without entering the draft mutation path", () => {
+    expect(cfpWizardSectionsSource).toContain("<Link href={accountHref}>Continue →</Link>");
+    expect(cfpWizardSectionsSource).toContain("const accountHref = getCfpStepRoute(");
+    expect(cfpWizardSectionsSource).toContain(
+      'onSubmit={step === "welcome" ? undefined : (event) => onSubmit(event)}',
+    );
+    expect(cfpWizardSectionsSource).toContain('{step !== "welcome" ? (');
+    expect(cfpWizardSource).toContain(
+      'if (step === "welcome") {\n      if (submissionsClosed) setSaveState("idle");\n      return;',
+    );
+  });
+
+  it("clears a pinned draft pointer only for a 404, not an authentication boundary", () => {
+    expect(cfpWizardSource).toContain("error.status !== 404");
+    expect(cfpWizardSource).not.toContain("error.status !== 401 && error.status !== 404");
+    expect(cfpWizardSource).toContain('pinnedDraft.status === "reset"');
+    expect(cfpWizardSource).toContain(': { status: "unavailable" };');
   });
 
   it("starts draft saving only after authentication reaches the proposal", () => {
@@ -307,18 +327,42 @@ describe("CFP flow", () => {
     const identity = { organizationId: "org-1", eventId: "event-1", formId: "form-1" };
     const pointerKey = getCfpSubmissionPointerStorageKey("org-1", "event-1", "form-1");
     const completionKey = getCfpCompletionHandoffStorageKey("org-1", "event-1", "form-1");
+    const activeKey = getCfpActiveSubmissionStorageKey("org-1", "event-1", "form-1");
     const localValues = new Map([[pointerKey, "submission-1"]]);
-    const sessionValues = new Map<string, string>();
+    const sessionValues = new Map<string, string>([[activeKey, "submission-1"]]);
 
     rotateCfpCompletionIdentity(
       identity,
       " submission-1 ",
-      { removeItem: (key) => localValues.delete(key) },
-      { setItem: (key, value) => sessionValues.set(key, value) },
+      {
+        getItem: (key) => localValues.get(key) ?? null,
+        removeItem: (key) => localValues.delete(key),
+      },
+      {
+        removeItem: (key) => sessionValues.delete(key),
+        setItem: (key, value) => sessionValues.set(key, value),
+      },
     );
 
     expect(localValues.has(pointerKey)).toBe(false);
+    expect(sessionValues.has(activeKey)).toBe(false);
     expect(sessionValues.get(completionKey)).toBe("submission-1");
+    localValues.set(pointerKey, "submission-2");
+    sessionValues.set(activeKey, "submission-1");
+    rotateCfpCompletionIdentity(
+      identity,
+      "submission-1",
+      {
+        getItem: (key) => localValues.get(key) ?? null,
+        removeItem: (key) => localValues.delete(key),
+      },
+      {
+        removeItem: (key) => sessionValues.delete(key),
+        setItem: (key, value) => sessionValues.set(key, value),
+      },
+    );
+    expect(localValues.get(pointerKey)).toBe("submission-2");
+    expect(sessionValues.has(activeKey)).toBe(false);
     expect(canResumeCfpSubmission("draft", "welcome")).toBe(true);
     expect(canResumeCfpSubmission("reopened", "account")).toBe(true);
     expect(canResumeCfpSubmission("submitted", "welcome")).toBe(true);

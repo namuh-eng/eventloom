@@ -52,7 +52,7 @@ const tasks: readonly PortalTask[] = [
   {
     id: "task-1",
     eventId: "north",
-    submissionId: "accepted-1",
+    subject: { type: "participant" },
     participantId: "speaker-1",
     type: "form",
     owner: "speaker",

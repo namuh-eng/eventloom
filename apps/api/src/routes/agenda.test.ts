@@ -28,6 +28,7 @@ const catalog: AgendaCatalog = {
       id: "session-1",
       title: "Opening",
       status: "accepted",
+      publicApprovalEligible: true,
       participantIds: ["participant-1"],
       resourceIds: [],
       capacityRequired: 40,
@@ -36,6 +37,7 @@ const catalog: AgendaCatalog = {
       id: "session-2",
       title: "Panel",
       status: "accepted",
+      publicApprovalEligible: true,
       participantIds: ["participant-2"],
       resourceIds: [],
       capacityRequired: 40,
@@ -44,6 +46,7 @@ const catalog: AgendaCatalog = {
       id: "session-3",
       title: "Deep dive",
       status: "accepted",
+      publicApprovalEligible: true,
       participantIds: ["participant-3"],
       resourceIds: [],
       capacityRequired: 40,
@@ -148,6 +151,7 @@ function appFor(
   eventOrganizationId = "org-a",
   afterPublish?: AgendaRouteDependencies["afterPublish"],
   eventMetadataForEvent?: AgendaRouteDependencies["eventMetadataForEvent"],
+  agendaCatalogForEvent: AgendaRouteDependencies["agendaCatalogForEvent"] = async () => catalog,
 ): Hono<AgendaRouteEnvironment> {
   const app = new Hono<AgendaRouteEnvironment>();
   app.use("*", async (context, next) => {
@@ -160,6 +164,7 @@ function appFor(
     createAgendaAdminRoutes({
       engine,
       organizationIdForEvent: async () => eventOrganizationId,
+      agendaCatalogForEvent,
       ...(afterPublish === undefined ? {} : { afterPublish }),
       ...(eventMetadataForEvent === undefined ? {} : { eventMetadataForEvent }),
     }),
@@ -180,7 +185,11 @@ function appForReadProfile(
   });
   app.route(
     "/api/admin/organizations/:organizationId/events/:eventId/agenda",
-    createAgendaAdminRoutes({ engine, organizationIdForEvent }),
+    createAgendaAdminRoutes({
+      engine,
+      organizationIdForEvent,
+      agendaCatalogForEvent: async () => catalog,
+    }),
   );
   return app;
 }
@@ -414,36 +423,54 @@ describe("canonical agenda draft routes", () => {
     expect(organizationIdForEvent).toHaveBeenCalledTimes(1);
     expect(load).toHaveBeenCalledTimes(1);
   });
-  it("does not accept a caller-selected timezone when creating an agenda", async () => {
+  it("rejects caller-supplied catalogs and uses the authoritative catalog when creating an agenda", async () => {
     const eventSchedule = {
       startsAt: "2026-08-10T16:00:00.000Z",
       endsAt: "2026-08-10T23:00:00.000Z",
       timeZone: "America/Los_Angeles",
     };
-    const injectedEngine = createEngine(undefined, eventSchedule);
-    const injectedApp = appFor(injectedEngine);
+    const authoritativeCatalog: AgendaCatalog = {
+      ...catalog,
+      sessions: catalog.sessions.map((session) =>
+        session.id === "session-1"
+          ? { ...session, title: "Authoritative opening", publicApprovalEligible: false }
+          : session,
+      ),
+    };
+    const agendaCatalogForEvent = vi.fn(async () => authoritativeCatalog);
+    const engine = createEngine(undefined, eventSchedule);
+    const app = appFor(engine, principal(), "org-a", undefined, undefined, agendaCatalogForEvent);
     const root = "/api/admin/organizations/org-a/events/event-a/agenda";
-    const injected = await injectedApp.request(root, {
+
+    const tampered = await app.request(root, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         ...catalog,
-        timeZone: "UTC",
+        sessions: catalog.sessions.map((session) => ({
+          ...session,
+          publicApprovalEligible: true,
+        })),
         minimumTravelMinutes: 0,
       }),
     });
-    expect(injected.status).toBe(400);
+    expect(tampered.status).toBe(400);
+    expect(agendaCatalogForEvent).not.toHaveBeenCalled();
 
-    const engine = createEngine(undefined, eventSchedule);
-    const app = appFor(engine);
     const created = await app.request(root, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...catalog, minimumTravelMinutes: 0 }),
+      body: JSON.stringify({ minimumTravelMinutes: 0 }),
     });
     expect(created.status).toBe(201);
     expect(await responseData<AgendaDraft>(created)).toMatchObject({
       timeZone: "America/Los_Angeles",
+    });
+    expect(agendaCatalogForEvent).toHaveBeenCalledWith("event-a");
+    expect((await engine.repository.load("event-a"))?.sessions[0]).toMatchObject({
+      id: "session-1",
+      title: "Authoritative opening",
+      publicApprovalEligible: false,
     });
   });
 
@@ -1274,6 +1301,7 @@ describe("canonical agenda draft routes", () => {
           id: "session-rejected",
           title: "Not accepted",
           status: "rejected",
+          publicApprovalEligible: false,
           participantIds: ["participant-4"],
           resourceIds: [],
           capacityRequired: 20,

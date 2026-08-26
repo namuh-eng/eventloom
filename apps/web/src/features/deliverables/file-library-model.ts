@@ -4,7 +4,12 @@ import type {
   DeliverableSpeakerProfile,
   DeliverableTask,
 } from "./api";
-import { type FileFamilyProjection, fileFamilyPointers } from "./file-family-model";
+import {
+  assetMatchesTaskScope,
+  type FileFamilyProjection,
+  fileFamilyPointers,
+  taskSessionId,
+} from "./file-family-model";
 import type { FileLibraryFilters, FileLibraryRow } from "./file-library-types";
 
 export function formatFileStatus(value: string): string {
@@ -64,8 +69,13 @@ export function buildFileLibraryRows(
 
   return families.map((family) => {
     const asset = family.displayVersion;
-    const task = tasksById.get(asset.taskId ?? "");
-    const sessionId = asset.submissionId ?? task?.submissionId ?? "";
+    const candidateTask = tasksById.get(asset.taskId ?? "");
+    const task =
+      candidateTask !== undefined && assetMatchesTaskScope(asset, candidateTask)
+        ? candidateTask
+        : undefined;
+    const sessionId =
+      asset.sessionId ?? (task === undefined ? undefined : taskSessionId(task)) ?? "";
     const review = fileReviewPresentation(asset);
 
     return {

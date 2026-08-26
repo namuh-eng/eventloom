@@ -10,6 +10,7 @@ import { OrganizerSubmittedReviews } from "./organizer-view-submitted-reviews";
 
 const submittedReview = {
   id: "review-1",
+  planId: "plan-1",
   roundId: "round-1",
   submissionId: "submission-1",
   reviewerId: "reviewer-1",
