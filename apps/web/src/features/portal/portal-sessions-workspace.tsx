@@ -52,7 +52,7 @@ export function SessionsWorkspaceView({
       <WorkspaceHeader
         eyebrow="Speaker workspace"
         title="Sessions"
-        description="Choose a session before reviewing its identity, tasks, and files."
+        description="Program sessions are managed independently from CFP proposal outcomes. Choose one to review its identity, tasks, and files."
         metadata={
           <>
             <span>{eventName}</span>

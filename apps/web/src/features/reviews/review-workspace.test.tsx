@@ -1005,7 +1005,7 @@ describe("review workspace", () => {
     expect(markup).toContain("Initial committee review");
     expect(markup).toContain("Aug 10, 2026");
     expect(markup).toContain("Aug 24, 2026");
-    expect(markup).toContain("67%");
+    expect(markup).toContain("83%");
     expect(markup).toContain("2 conflicts declared");
     expect(markup).not.toContain("Calibration and final review");
     expect(markup).not.toContain("Blind review");
@@ -1180,7 +1180,7 @@ describe("review workspace", () => {
     expect(markup).not.toContain("Counted aggregate scores");
     expect(markup).not.toContain("Human decisions");
   });
-  it("normalizes decimal completion percentages consistently across text, width, and ARIA", () => {
+  it("renders aggregate review completion consistently across text, width, and ARIA", () => {
     const plan = testPlan("summit-2026");
     const decimalPlan: ReviewPlanSeed = {
       ...plan,
@@ -1205,9 +1205,9 @@ describe("review workspace", () => {
     );
 
     expect(normalizeCompletionPercent(66.66666666666666)).toBe(67);
-    expect(markup).toContain("<strong>67%</strong>");
-    expect(markup).toContain('aria-valuenow="67"');
-    expect(markup).toContain('style="transform:translateX(-33%)"');
+    expect(markup).toContain("<strong>83%</strong>");
+    expect(markup).toContain('aria-valuenow="83"');
+    expect(markup).toContain('style="transform:translateX(-17%)"');
   });
   it("derives round completion from the authoritative active assignment projection", () => {
     const base = testPlan("summit-2026").assignments[0];

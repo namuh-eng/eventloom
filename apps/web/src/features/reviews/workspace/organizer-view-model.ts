@@ -146,7 +146,11 @@ export function deriveOrganizerWorkspaceModel({
     (row) => row.decisionLabel !== "Not decided",
   ).length;
   const overviewAttentionCount = overviewRows.filter((row) => row.attentionKind !== "none").length;
-  const overviewCompletionPercent = normalizeCompletionPercent(seed.progress.completionPercent);
+  const overviewCompletionPercent = normalizeCompletionPercent(
+    overviewExpectedReviewCount === 0
+      ? 0
+      : (overviewCompletedReviewCount / overviewExpectedReviewCount) * 100,
+  );
   const overviewMetrics = [
     {
       label: "Review window",
@@ -159,7 +163,7 @@ export function deriveOrganizerWorkspaceModel({
       detail: "reviewer slots assigned",
     },
     {
-      label: "Assigned review completion",
+      label: "Review completion",
       value: `${overviewCompletionPercent}%`,
       detail: `${overviewCompletedReviewCount} of ${overviewExpectedReviewCount} reviews submitted`,
     },
@@ -175,7 +179,7 @@ export function deriveOrganizerWorkspaceModel({
       overviewAttentionCount === 1 ? "submission needs attention" : "submissions need attention",
     description:
       overviewAttentionCount === 0
-        ? `${seed.progress.conflicts} conflicts declared. Coverage, assigned review completion, and decisions are up to date.`
+        ? `${seed.progress.conflicts} conflicts declared. Coverage, review completion, and decisions are up to date.`
         : `${seed.progress.conflicts} conflicts declared. Use row actions to resolve coverage, review progress, conflicts, or decisions.`,
   };
 

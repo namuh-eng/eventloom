@@ -37,9 +37,9 @@ export function FileReviewDrawerBody({
 }: FileReviewBodyProps) {
   if (family === undefined) {
     return (
-      <Alert variant="destructive">
+      <Alert role="status">
         <AlertDescription>
-          The selected private file is no longer present in this event projection.
+          Refreshing private file details from the authoritative event projection.
         </AlertDescription>
       </Alert>
     );

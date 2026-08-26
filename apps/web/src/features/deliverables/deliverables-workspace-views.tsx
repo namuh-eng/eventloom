@@ -676,9 +676,9 @@ function SelectedAssetEvidence({
       </CardHeader>
       <CardContent className={stackClass}>
         {selectedAsset === undefined ? (
-          <Alert variant="destructive" role="alert">
+          <Alert role="status">
             <AlertDescription>
-              The selected private asset is no longer present in this event projection.
+              Refreshing the selected private asset from the authoritative event projection.
             </AlertDescription>
           </Alert>
         ) : (
