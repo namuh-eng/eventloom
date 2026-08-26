@@ -222,7 +222,13 @@ export function filterSpeakerRoster(
     const progressRow = progressByParticipant.get(speaker.participantId);
     const matchesProgress =
       filters.progress === "all" ||
-      speakerProgressMatches(progressRow?.tasks ?? [], filters.progress);
+      (progressRow !== undefined && progressRow.tasks.length > 0
+        ? speakerProgressMatches(progressRow.tasks, filters.progress)
+        : filters.progress === "complete"
+          ? speaker.taskSummary.total > 0 &&
+            speaker.taskSummary.completed === speaker.taskSummary.total
+          : speaker.taskSummary.total > 0 &&
+            speaker.taskSummary.completed < speaker.taskSummary.total);
     return matchesQuery && matchesStatus && matchesSession && matchesProgress;
   });
 }

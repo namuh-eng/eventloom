@@ -989,7 +989,7 @@ describe("speaker workspace contracts", () => {
       ),
     ).rejects.toThrow("different organization, event, or profile");
   });
-  it("applies exact roster and progress filters without treating zero-task speakers as incomplete", () => {
+  it("falls back to authoritative task summaries when progress rows have no tasks", () => {
     const secondSpeaker: SpeakerRecord = {
       ...speaker,
       participantId: "participant-2",
@@ -999,7 +999,7 @@ describe("speaker workspace contracts", () => {
       sessions: [
         { sessionId: "session-2", title: "Reliable queues", status: "accepted", version: 1 },
       ],
-      taskSummary: { total: 0, completed: 0, overdue: 0 },
+      taskSummary: { total: 3, completed: 0, overdue: 0 },
     };
     const completedTask: SpeakerTask = {
       ...task,
@@ -1029,7 +1029,7 @@ describe("speaker workspace contracts", () => {
         session: "session-2",
         progress: "incomplete",
       }).map((candidate) => candidate.participantId),
-    ).toEqual([]);
+    ).toEqual(["participant-2"]);
     expect(
       filterSpeakerRoster([speaker, secondSpeaker], rows, {
         query: "",

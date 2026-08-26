@@ -159,7 +159,7 @@ export function deriveOrganizerWorkspaceModel({
       detail: "reviewer slots assigned",
     },
     {
-      label: "Review completion",
+      label: "Assigned review completion",
       value: `${overviewCompletionPercent}%`,
       detail: `${overviewCompletedReviewCount} of ${overviewExpectedReviewCount} reviews submitted`,
     },
@@ -175,7 +175,7 @@ export function deriveOrganizerWorkspaceModel({
       overviewAttentionCount === 1 ? "submission needs attention" : "submissions need attention",
     description:
       overviewAttentionCount === 0
-        ? `${seed.progress.conflicts} conflicts declared. Coverage, review completion, and decisions are up to date.`
+        ? `${seed.progress.conflicts} conflicts declared. Coverage, assigned review completion, and decisions are up to date.`
         : `${seed.progress.conflicts} conflicts declared. Use row actions to resolve coverage, review progress, conflicts, or decisions.`,
   };
 
