@@ -42,6 +42,7 @@ const target: PortalContext = {
 it("retains the previous portal view only for a failed same-context refresh", () => {
   const previousView = {
     submissions: [],
+    sessions: [],
     profiles: [],
     tasks: [],
     outstandingTaskCount: 0,
@@ -87,6 +88,7 @@ function view(
 ): PortalView {
   return {
     submissions,
+    sessions: [],
     profiles: [],
     tasks: [],
     outstandingTaskCount: 0,

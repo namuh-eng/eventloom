@@ -1569,6 +1569,7 @@ function portalScopeForPrimary(
 type OrganizerSpeakerMutationProjection = {
   scope: SpeakerAccessScope & { tenantId: string; organizer: true };
   acceptedSubmissions: readonly SpeakerSubmission[];
+  canonicalSessions: readonly import("./types").SpeakerCanonicalSession[];
   entries: SpeakerRosterEntry[];
   profiles: SpeakerProfile[];
   tasks: readonly SpeakerTask[];
@@ -1967,6 +1968,10 @@ export class SpeakerService {
           );
 
     const rawSubmissionsPromise = this.repository.listSubmissions(eventId, scope.submissionIds);
+    const canonicalSessionsPromise =
+      primaryParticipantId === undefined
+        ? Promise.resolve([])
+        : this.repository.listPortalCanonicalSessions(eventId, accountId);
     const rawProfilesPromise =
       primaryParticipantId === undefined
         ? Promise.resolve([])
@@ -2008,6 +2013,7 @@ export class SpeakerService {
 
     const [
       rawSubmissions,
+      canonicalSessions,
       rawProfiles,
       rawTasks,
       contexts,
@@ -2018,6 +2024,7 @@ export class SpeakerService {
       temporalContext,
     ] = await Promise.all([
       rawSubmissionsPromise,
+      canonicalSessionsPromise,
       rawProfilesPromise,
       rawTasksPromise,
       contextsPromise,
@@ -2133,6 +2140,9 @@ export class SpeakerService {
       submissions,
       profiles,
       tasks,
+      sessions: canonicalSessions
+        .filter((session) => session.participantId === primaryParticipantId)
+        .map(({ participantId: _participantId, ...session }) => session),
       outstandingTaskCount: tasks.filter(
         (task) => task.status !== "completed" && task.status !== "waived",
       ).length,
@@ -7548,25 +7558,16 @@ export class SpeakerService {
     accountId: string,
     participantId: string,
   ): Promise<SpeakerWorkspaceSession[]> {
-    const scope = await this.requireOrganizerOrganizationScope(organizationId, eventId, accountId);
-    const roster = await this.organizerRosterEntries(organizationId, eventId, scope, accountId);
-    const manual = roster.some(
-      (entry) => entry.participantId === participantId && isOrganizerManagedRosterEntry(entry),
+    const projection = await this.organizerSpeakerMutationProjection(
+      organizationId,
+      eventId,
+      accountId,
     );
-    if (!scope.participantIds.includes(participantId) && !manual) throw notFound();
-    const submissions = await this.repository.listSubmissions(eventId, scope.submissionIds);
-    return submissions
-      .filter(
-        (submission) =>
-          submission.eventId === eventId &&
-          submission.status === "accepted" &&
-          submission.participantIds.includes(participantId),
-      )
-      .map((submission) => ({
-        submissionId: canonicalSpeakerSubmissionId(submission.id),
-        title: submission.title,
-        status: submission.status,
-      }));
+    const speaker = projection.entries.find((entry) => entry.participantId === participantId);
+    if (speaker === undefined) throw notFound();
+    return projection.canonicalSessions
+      .filter((session) => session.participantId === participantId)
+      .map(({ participantId: _participantId, ...session }) => session);
   }
 
   async listOrganizerSpeakerAssets(
@@ -7790,7 +7791,8 @@ export class SpeakerService {
       !isReadModelCollection(readModel.roster) ||
       !isReadModelCollection(readModel.profiles) ||
       !isReadModelCollection(readModel.tasks) ||
-      !isReadModelCollection(readModel.assets)
+      !isReadModelCollection(readModel.assets) ||
+      !isReadModelCollection(readModel.canonicalSessions)
     ) {
       throw notFound();
     }
@@ -7802,6 +7804,7 @@ export class SpeakerService {
     const roster = readModel.roster.filter((candidate) =>
       organizerRecordTenantMatches(candidate, scope.tenantId),
     );
+    const canonicalSessions = readModel.canonicalSessions;
     const profileParticipantIds = new Set([
       ...scope.participantIds,
       ...(includeProfileParticipantId === undefined ? [] : [includeProfileParticipantId]),
@@ -7903,6 +7906,7 @@ export class SpeakerService {
     return {
       scope,
       acceptedSubmissions,
+      canonicalSessions,
       entries,
       profiles: rosterProjection.profiles,
       tasks,
@@ -7924,15 +7928,14 @@ export class SpeakerService {
         profileByParticipant.set(profile.participantId, profile);
       }
     }
-    const submissionsByParticipant = new Map<string, SpeakerSubmission[]>();
-    for (const submission of projection.acceptedSubmissions) {
-      for (const participantId of new Set(submission.participantIds)) {
-        const participantSubmissions = submissionsByParticipant.get(participantId);
-        if (participantSubmissions === undefined) {
-          submissionsByParticipant.set(participantId, [submission]);
-        } else {
-          participantSubmissions.push(submission);
-        }
+    const sessionsByParticipant = new Map<string, SpeakerWorkspaceSession[]>();
+    for (const session of projection.canonicalSessions) {
+      const participantSessions = sessionsByParticipant.get(session.participantId);
+      const { participantId: _participantId, ...workspaceSession } = session;
+      if (participantSessions === undefined) {
+        sessionsByParticipant.set(session.participantId, [workspaceSession]);
+      } else {
+        participantSessions.push(workspaceSession);
       }
     }
     const tasksByParticipant = new Map<string, SpeakerTask[]>();
@@ -7960,7 +7963,7 @@ export class SpeakerService {
         entry.participantId,
         entry,
         profileByParticipant.get(entry.participantId),
-        submissionsByParticipant.get(entry.participantId) ?? [],
+        sessionsByParticipant.get(entry.participantId) ?? [],
         tasksByParticipant.get(entry.participantId) ?? [],
         assetsByParticipant.get(entry.participantId) ?? [],
         temporalContext?.timeZone,
@@ -8175,7 +8178,7 @@ export class SpeakerService {
     participantId: string,
     entry: SpeakerRosterEntry,
     profile: SpeakerProfile | undefined,
-    submissions: readonly SpeakerSubmission[],
+    sessions: readonly SpeakerWorkspaceSession[],
     tasks: readonly SpeakerTask[],
     assets: readonly SpeakerAsset[],
     eventTimeZone?: string,
@@ -8211,13 +8214,10 @@ export class SpeakerService {
       ),
       headshotAssetId: profile?.headshotAssetId ?? entry.headshotAssetId ?? null,
       status: profile?.status ?? entry.organizerStatus ?? entry.workflowStatus ?? entry.status,
-      sessions: submissions
-        .filter((submission) => submission.participantIds.includes(participantId))
-        .map((submission) => ({
-          submissionId: canonicalSpeakerSubmissionId(submission.id),
-          title: submission.title,
-          status: submission.status,
-        })),
+      sessions: [...sessions].sort(
+        (left, right) =>
+          left.title.localeCompare(right.title) || left.sessionId.localeCompare(right.sessionId),
+      ),
       taskSummary: {
         total: participantTasks.length,
         completed,

@@ -218,7 +218,7 @@ export function filterSpeakerRoster(
     const matchesStatus = filters.status === "all" || speaker.status === filters.status;
     const matchesSession =
       filters.session === "all" ||
-      speaker.sessions.some((session) => session.submissionId === filters.session);
+      speaker.sessions.some((session) => session.sessionId === filters.session);
     const progressRow = progressByParticipant.get(speaker.participantId);
     const matchesProgress =
       filters.progress === "all" ||

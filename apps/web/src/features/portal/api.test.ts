@@ -6,6 +6,7 @@ const emptyPortal: PortalView = {
   submissions: [],
   profiles: [],
   tasks: [],
+  sessions: [],
   outstandingTaskCount: 0,
 };
 

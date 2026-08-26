@@ -851,6 +851,90 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
       }),
     ).rejects.toThrow("d1 unavailable");
   });
+  it("projects only accepted canonical D1 sessions to organizers and invited portal speakers", async () => {
+    const fixture = createSpeakerLifecycleFixture();
+    fixtures.push(fixture);
+    const { service } = fixture.createPhase();
+    const created = await service.createOrganizerSpeaker({
+      organizationId,
+      eventId,
+      accountId: organizerAccountId,
+      displayName: "Marcus Chen",
+      email: "marcus@example.test",
+      jobTitle: "Developer Advocate",
+      company: "Cloud Co",
+      biography: "Marcus biography.",
+      socialLinks: {},
+      status: "confirmed",
+      idempotencyKey: "canonical-marcus",
+      sourceType: "manual",
+      sourceId: "canonical-marcus",
+    });
+    const marcus = created.speakers.find((speaker) => speaker.email === "marcus@example.test");
+    if (marcus === undefined) throw new Error("Expected Marcus in the organizer roster.");
+
+    fixture.database.executeScript(`
+      INSERT INTO sessions
+        (id, organization_id, event_id, title, description, status, content_status,
+         duration_minutes, capacity_required, room_id, format_id, level_id, version, created_at,
+         updated_at, created_by, updated_by, deleted_at)
+      VALUES
+        ('lightning-session', '${organizationId}', '${eventId}', 'Lightning Talk', '', 'accepted',
+         NULL, 15, 0, NULL, NULL, NULL, 7, '2099-08-15T04:00:00.000Z',
+         '2099-08-15T04:00:00.000Z', '${organizerAccountId}', '${organizerAccountId}', NULL);
+      INSERT INTO session_speakers
+        (organization_id, event_id, session_id, speaker_id, display_name, role, ordinal)
+      VALUES
+        ('${organizationId}', '${eventId}', 'lightning-session', '${marcus.participantId}',
+         'Marcus Chen', 'speaker', 0),
+        ('${organizationId}', '${eventId}', 'lightning-session', '${acceptedParticipantId}',
+         'Accepted Speaker', 'speaker', 1);
+    `);
+
+    const organizerRoster = await service.listOrganizerSpeakerRoster(
+      organizationId,
+      eventId,
+      organizerAccountId,
+    );
+    expect(
+      organizerRoster.speakers.find((speaker) => speaker.participantId === marcus.participantId)
+        ?.sessions,
+    ).toEqual([
+      { sessionId: "lightning-session", title: "Lightning Talk", status: "accepted", version: 7 },
+    ]);
+    await expect(
+      service.listOrganizerSpeakerSessions(
+        organizationId,
+        eventId,
+        organizerAccountId,
+        marcus.participantId,
+      ),
+    ).resolves.toEqual([
+      { sessionId: "lightning-session", title: "Lightning Talk", status: "accepted", version: 7 },
+    ]);
+
+    await createAndAcceptSpeakerInvitation({
+      database: fixture.database as unknown as D1Database,
+      invitationId: "canonical-marcus-invitation",
+      creationIdempotencyKey: "canonical-marcus-invitation",
+      participantId: marcus.participantId,
+      accountId: marcusAccountId,
+      email: "marcus@example.test",
+      invitedAt: "2099-08-15T04:01:00.000Z",
+      acceptedAt: "2099-08-15T04:02:00.000Z",
+    });
+    await expect(service.getPortal(eventId, marcusAccountId)).resolves.toMatchObject({
+      sessions: [
+        { sessionId: "lightning-session", title: "Lightning Talk", status: "accepted", version: 7 },
+      ],
+    });
+    await expect(service.getPortal(eventId, priyaAccountId)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    await expect(service.getPortal(eventId, acceptedAccountId)).resolves.toMatchObject({
+      sessions: [],
+    });
+  });
 
   it("roundtrips organizer, participant, task, profile, and private-headshot state", async () => {
     const fixture = createSpeakerLifecycleFixture();
@@ -882,12 +966,7 @@ describe("Airtable-free speaker lifecycle on canonical D1", () => {
           expect.objectContaining({
             participantId: acceptedParticipantId,
             status: "confirmed",
-            sessions: [
-              expect.objectContaining({
-                submissionId: `speaker-submission:${acceptedSubmissionId}`,
-                status: "accepted",
-              }),
-            ],
+            sessions: [],
           }),
         ]),
       );

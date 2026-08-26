@@ -13,16 +13,16 @@ export function acceptedSpeakerSessions(
   return sessions.filter((session) => session.status.trim().toLowerCase() === "accepted");
 }
 
-export function organizerHeadshotSubmissionId(
+export function organizerHeadshotSessionId(
   sessions: readonly SpeakerSession[],
-  requestedSubmissionId: string | null | undefined,
+  requestedSessionId: string | null | undefined,
 ): string | null {
   const eligibleSessions = acceptedSpeakerSessions(sessions);
-  if (eligibleSessions.length === 1) return eligibleSessions.at(0)?.submissionId ?? null;
-  return requestedSubmissionId !== null &&
-    requestedSubmissionId !== undefined &&
-    eligibleSessions.some((session) => session.submissionId === requestedSubmissionId)
-    ? requestedSubmissionId
+  if (eligibleSessions.length === 1) return eligibleSessions.at(0)?.sessionId ?? null;
+  return requestedSessionId !== null &&
+    requestedSessionId !== undefined &&
+    eligibleSessions.some((session) => session.sessionId === requestedSessionId)
+    ? requestedSessionId
     : null;
 }
 

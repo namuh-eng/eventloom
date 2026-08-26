@@ -27,6 +27,7 @@ import type {
   SpeakerAssetAuditEntry,
   SpeakerAssetComment,
   SpeakerAssetReviewCommand,
+  SpeakerCanonicalSession,
   SpeakerDecisionWriteFence,
   SpeakerEventResource,
   SpeakerImportPreview,
@@ -94,6 +95,39 @@ export class D1SpeakerRepository
   constructor(db: D1Database) {
     this.#db = db;
     this.#orm = createDatabase(db);
+  }
+  async #canonicalSessionsForParticipants(
+    organizationId: string,
+    eventId: string,
+    participantIds: readonly string[],
+  ): Promise<readonly SpeakerCanonicalSession[]> {
+    const uniqueParticipantIds = [...new Set(participantIds)];
+    if (uniqueParticipantIds.length === 0) return [];
+    const placeholders = uniqueParticipantIds.map(() => "?").join(",");
+    const rows = await this.#db
+      .prepare(
+        `SELECT s.id AS session_id, s.title, s.status, s.version, ss.speaker_id AS participant_id
+           FROM sessions s
+           JOIN session_speakers ss
+             ON ss.organization_id = s.organization_id
+            AND ss.event_id = s.event_id
+            AND ss.session_id = s.id
+          WHERE s.organization_id = ?
+            AND s.event_id = ?
+            AND s.deleted_at IS NULL
+            AND lower(s.status) = 'accepted'
+            AND ss.speaker_id IN (${placeholders})
+          ORDER BY ss.speaker_id, s.title, s.id`,
+      )
+      .bind(organizationId, eventId, ...uniqueParticipantIds)
+      .all<Record<string, unknown>>();
+    return (rows.results ?? []).map((row) => ({
+      participantId: String(row.participant_id),
+      sessionId: String(row.session_id),
+      title: String(row.title),
+      status: String(row.status),
+      version: Number(row.version),
+    }));
   }
 
   async #grantedAccessScope(
@@ -438,6 +472,46 @@ export class D1SpeakerRepository
   async listPortalContexts(accountId: string) {
     return (await this.listPortalContextScopes(accountId)).map(({ context }) => context);
   }
+  async listPortalCanonicalSessions(
+    eventId: string,
+    accountId: string,
+  ): Promise<readonly SpeakerCanonicalSession[]> {
+    const rows = await this.#db
+      .prepare(
+        `SELECT s.id AS session_id, s.title, s.status, s.version, ss.speaker_id AS participant_id
+           FROM participant_grants pg
+           JOIN event_role_invitations invitation
+             ON invitation.organization_id = pg.organization_id
+            AND invitation.event_id = pg.event_id
+            AND invitation.role = 'speaker'
+            AND invitation.recipient_user_id = pg.user_id
+            AND invitation.participant_id = pg.participant_id
+            AND invitation.status = 'accepted'
+           JOIN sessions s
+             ON s.organization_id = pg.organization_id
+            AND s.event_id = pg.event_id
+            AND s.deleted_at IS NULL
+            AND lower(s.status) = 'accepted'
+           JOIN session_speakers ss
+             ON ss.organization_id = s.organization_id
+            AND ss.event_id = s.event_id
+            AND ss.session_id = s.id
+            AND ss.speaker_id = pg.participant_id
+          WHERE pg.event_id = ?
+            AND pg.user_id = ?
+            AND pg.revoked_at IS NULL
+          ORDER BY ss.speaker_id, s.title, s.id`,
+      )
+      .bind(eventId, accountId)
+      .all<Record<string, unknown>>();
+    return (rows.results ?? []).map((row) => ({
+      participantId: String(row.participant_id),
+      sessionId: String(row.session_id),
+      title: String(row.title),
+      status: String(row.status),
+      version: Number(row.version),
+    }));
+  }
 
   async getOrganizerAccessScope(
     eventId: string,
@@ -506,14 +580,24 @@ export class D1SpeakerRepository
   ): Promise<SpeakerOrganizerReadModel | null> {
     const scope = await this.getOrganizerAccessScope(eventId, accountId);
     if (scope === null) return null;
-    const [submissionsForScope, roster, profiles, tasks, assets] = await Promise.all([
-      this.listSubmissions(eventId, scope.submissionIds),
-      this.listRosterForEvent(eventId),
-      resources.profiles === true ? this.listProfilesForEvent(scope.tenantId, eventId) : [],
-      resources.tasks === true ? this.listTasks(eventId, scope.participantIds) : [],
-      resources.assets === true ? this.listAssets(eventId, scope.participantIds) : [],
-    ]);
-    return { scope, submissions: submissionsForScope, roster, profiles, tasks, assets };
+    const [submissionsForScope, roster, profiles, tasks, assets, canonicalSessions] =
+      await Promise.all([
+        this.listSubmissions(eventId, scope.submissionIds),
+        this.listRosterForEvent(eventId),
+        resources.profiles === true ? this.listProfilesForEvent(scope.tenantId, eventId) : [],
+        resources.tasks === true ? this.listTasks(eventId, scope.participantIds) : [],
+        resources.assets === true ? this.listAssets(eventId, scope.participantIds) : [],
+        this.#canonicalSessionsForParticipants(scope.tenantId, eventId, scope.participantIds),
+      ]);
+    return {
+      scope,
+      submissions: submissionsForScope,
+      roster,
+      profiles,
+      tasks,
+      assets,
+      canonicalSessions,
+    };
   }
 
   async resolveEventParticipant(input: {

@@ -297,6 +297,7 @@ function emptyScopedPortalView(
     profiles: [],
     tasks: [],
     outstandingTaskCount: 0,
+    sessions: [],
     assets: [],
     ...(capabilities === undefined ? {} : { capabilities }),
     ...(scopedContext === undefined ? {} : { context: scopedContext }),
@@ -363,6 +364,10 @@ export function scopePortalViewToAuthorizedParticipants(
           );
         });
 
+  const sessions =
+    selectedParticipant !== null && selectedParticipant === context?.primaryParticipantId
+      ? view.sessions
+      : [];
   return {
     submissions,
     profiles:
@@ -373,6 +378,7 @@ export function scopePortalViewToAuthorizedParticipants(
               profile.eventId === eventId && profile.participantId === selectedParticipant,
           ),
     tasks,
+    sessions,
     outstandingTaskCount: tasks.filter((task) => !isTaskFinished(task)).length,
     assets,
     ...(view.roster !== undefined &&

@@ -305,9 +305,14 @@ export interface SpeakerRosterEntry {
   authorAccountId?: string;
 }
 export interface SpeakerWorkspaceSession {
-  submissionId: string;
+  sessionId: string;
   title: string;
   status: string;
+  version: number;
+}
+
+export interface SpeakerCanonicalSession extends SpeakerWorkspaceSession {
+  participantId: string;
 }
 
 export interface SpeakerWorkspaceAsset {
@@ -1081,6 +1086,7 @@ export interface SpeakerOrganizerReadModel {
   profiles: readonly SpeakerProfile[];
   tasks: readonly SpeakerTask[];
   assets: readonly SpeakerAsset[];
+  canonicalSessions: readonly SpeakerCanonicalSession[];
 }
 
 export interface OrganizationQualifiedSpeakerSubmission extends SpeakerSubmission {
@@ -1167,6 +1173,10 @@ export interface SpeakerRepository {
   listPortalContextScopes?(
     accountId: string,
   ): Promise<readonly SpeakerPortalContextScopeProjection[]>;
+  listPortalCanonicalSessions(
+    eventId: string,
+    accountId: string,
+  ): Promise<readonly SpeakerCanonicalSession[]>;
   listRoster?(eventId: string, submissionId: string): Promise<SpeakerRosterEntry[]>;
   /** Efficient event-wide roster projection used by organizer workspaces. */
   listRosterForEvent?(eventId: string): Promise<SpeakerRosterEntry[]>;
@@ -1392,6 +1402,7 @@ export interface SpeakerPortalView {
   submissions: SpeakerSubmission[];
   profiles: SpeakerProfile[];
   tasks: SpeakerTask[];
+  sessions: SpeakerWorkspaceSession[];
   outstandingTaskCount: number;
   context?: SpeakerPortalContext;
   capabilities?: readonly SpeakerPortalCapability[];

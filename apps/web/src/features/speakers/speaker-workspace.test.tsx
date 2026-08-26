@@ -25,7 +25,7 @@ import {
   organizerHeadshotPreviewKey,
   organizerHeadshotPreviewPath,
   organizerHeadshotPreviewRequestKey,
-  organizerHeadshotSubmissionId,
+  organizerHeadshotSessionId,
   validateOrganizerHeadshotFile,
 } from "./speaker-headshot-logic";
 import { SpeakerInvitationControls } from "./speaker-invitations";
@@ -63,7 +63,9 @@ const speaker: SpeakerRecord = {
   socialLinks: { twitter: "https://x.com/priya", linkedin: "https://linkedin.com/in/priya" },
   headshotAssetId: null,
   status: "confirmed",
-  sessions: [{ submissionId: "session-1", title: "Incremental builds", status: "accepted" }],
+  sessions: [
+    { sessionId: "session-1", title: "Incremental builds", status: "accepted", version: 1 },
+  ],
   taskSummary: { total: 3, completed: 2, overdue: 0 },
   assets: [],
   version: 3,
@@ -241,20 +243,20 @@ describe("organizer headshot session scope", () => {
   it("automatically uses the sole accepted session and excludes other statuses", () => {
     const sessions = [
       ...speaker.sessions,
-      { submissionId: "session-declined", title: "Declined", status: "declined" },
+      { sessionId: "session-declined", title: "Declined", status: "declined", version: 2 },
     ];
     expect(acceptedSpeakerSessions(sessions)).toEqual([speaker.sessions[0]]);
-    expect(organizerHeadshotSubmissionId(sessions, null)).toBe("session-1");
+    expect(organizerHeadshotSessionId(sessions, null)).toBe("session-1");
   });
 
-  it("requires an explicit eligible submission when multiple accepted sessions exist", () => {
+  it("requires an explicit eligible session when multiple accepted sessions exist", () => {
     const sessions = [
       ...speaker.sessions,
-      { submissionId: "session-2", title: "Second session", status: "Accepted" },
+      { sessionId: "session-2", title: "Second session", status: "Accepted", version: 3 },
     ];
-    expect(organizerHeadshotSubmissionId(sessions, null)).toBeNull();
-    expect(organizerHeadshotSubmissionId(sessions, "session-2")).toBe("session-2");
-    expect(organizerHeadshotSubmissionId(sessions, "session-declined")).toBeNull();
+    expect(organizerHeadshotSessionId(sessions, null)).toBeNull();
+    expect(organizerHeadshotSessionId(sessions, "session-2")).toBe("session-2");
+    expect(organizerHeadshotSessionId(sessions, "session-declined")).toBeNull();
   });
 });
 
@@ -994,7 +996,9 @@ describe("speaker workspace contracts", () => {
       displayName: "Marcus Chen",
       email: "marcus@example.test",
       status: "invited",
-      sessions: [{ submissionId: "session-2", title: "Reliable queues", status: "accepted" }],
+      sessions: [
+        { sessionId: "session-2", title: "Reliable queues", status: "accepted", version: 1 },
+      ],
       taskSummary: { total: 0, completed: 0, overdue: 0 },
     };
     const completedTask: SpeakerTask = {

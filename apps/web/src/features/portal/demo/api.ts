@@ -34,6 +34,14 @@ function createSeedView(eventId: string): PortalView {
         updatedAt: INITIAL_TIMESTAMP,
       },
     ],
+    sessions: [
+      {
+        sessionId,
+        title: "Building resilient event systems",
+        status: "confirmed",
+        version: 1,
+      },
+    ],
     profiles: [
       {
         id: "demo-profile-ada",
@@ -138,6 +146,7 @@ function cloneView(view: PortalView): PortalView {
       ...submission,
       participantIds: [...submission.participantIds],
     })),
+    sessions: view.sessions.map((session) => ({ ...session })),
     profiles: view.profiles.map(cloneProfile),
     tasks: view.tasks.map(cloneTask),
     outstandingTaskCount: view.outstandingTaskCount,

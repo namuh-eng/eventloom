@@ -75,6 +75,12 @@ export interface PortalSubmission {
   closeAt?: string;
   answers?: Readonly<Record<string, unknown>>;
 }
+export interface PortalSession {
+  sessionId: string;
+  title: string;
+  status: string;
+  version: number;
+}
 
 export interface PortalProfile {
   id: string;
@@ -290,6 +296,7 @@ export interface PortalView {
   submissions: PortalSubmission[];
   profiles: PortalProfile[];
   tasks: PortalTask[];
+  sessions: PortalSession[];
   outstandingTaskCount: number;
   context?: PortalContext;
   capabilities?: readonly PortalCapability[];

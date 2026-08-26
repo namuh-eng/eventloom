@@ -448,6 +448,9 @@ class LifecycleRepository implements SpeakerRepository {
   listPortalContexts(accountId: string): Promise<SpeakerPortalContext[]> {
     return Promise.resolve(accountId === "account-1" ? this.contexts : []);
   }
+  listPortalCanonicalSessions() {
+    return Promise.resolve([]);
+  }
 
   listRoster(eventId: string, submissionId: string): Promise<SpeakerRosterEntry[]> {
     return Promise.resolve(

@@ -156,13 +156,13 @@ function SpeakerRosterView({
       error: string | null;
       revision: number;
       eligibleSessions: readonly SpeakerSession[];
-      selectedSubmissionId: string | null;
+      selectedSessionId: string | null;
       uploadStatus: string;
       uploadMessage: string | null;
       replacementAvailable: boolean;
       onRetry: () => void;
       onImageError: () => void;
-      onSessionChange: (submissionId: string) => void;
+      onSessionChange: (sessionId: string) => void;
       onUpload: (file: File) => void;
       mutationStatus: SpeakerMutationStatus;
       mutationMessage: string | null;

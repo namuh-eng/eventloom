@@ -120,6 +120,7 @@ import type {
   SpeakerAssetAuditEntry,
   SpeakerAssetComment,
   SpeakerAssetReviewCommand,
+  SpeakerCanonicalSession,
   SpeakerContentHistoryEntry,
   SpeakerContentRecord,
   SpeakerEventResource,
@@ -560,6 +561,13 @@ export class LocalSpeakerRepository
     Awaited<ReturnType<SpeakerOrganizerLifecycleRepository["saveOrganizerSpeakerImportPreview"]>>
   >();
   readonly #aggregateOperations = new Map<string, { digest: string; participantIds: string[] }>();
+  #canonicalSessionReader?: (eventId: string) => Promise<readonly SpeakerCanonicalSession[]>;
+
+  setCanonicalSessionReader(
+    reader: (eventId: string) => Promise<readonly SpeakerCanonicalSession[]>,
+  ): void {
+    this.#canonicalSessionReader = reader;
+  }
 
   constructor(
     private readonly invitationRecipientForEmail: (
@@ -758,6 +766,11 @@ export class LocalSpeakerRepository
       },
     ];
   }
+  async listPortalCanonicalSessions(): Promise<readonly SpeakerCanonicalSession[]> {
+    // Local CFP contexts are not explicit speaker invitations, so they confer no session access.
+    return [];
+  }
+
   async getOrganizerAccessScope(eventId: string, accountId: string) {
     if (accountId !== LOCAL_ORGANIZER_ACCOUNT_ID) return null;
     this.#ensureEvent(eventId);
@@ -795,6 +808,10 @@ export class LocalSpeakerRepository
   ): Promise<SpeakerOrganizerReadModel | null> {
     const scope = await this.getOrganizerAccessScope(eventId, accountId);
     if (scope === null) return null;
+    if (this.#canonicalSessionReader === undefined) {
+      throw new Error("Canonical session reader unavailable");
+    }
+    const canonicalSessions = await this.#canonicalSessionReader(eventId);
     const submissions = await this.listSubmissions(eventId, scope.submissionIds);
     const profiles = resources.profiles === true ? clone(this.#profiles.get(eventId) ?? []) : [];
     const tasks = resources.tasks === true ? clone(this.#tasks.get(eventId) ?? []) : [];
@@ -833,7 +850,7 @@ export class LocalSpeakerRepository
         updatedAt: profile.updatedAt,
       };
     });
-    return { scope, submissions, roster, profiles, tasks, assets };
+    return { scope, submissions, roster, profiles, tasks, assets, canonicalSessions };
   }
 
   async resolveEventParticipant(
@@ -3102,6 +3119,19 @@ export function createLocalDependencies(aiProviders?: CloudflareAiProviders): Ap
   );
   const sessionRepository = new LocalSessionRepository(speakerRepository, (fence) =>
     localDecisionFenceChecker(fence),
+  );
+  speakerRepository.setCanonicalSessionReader(async (eventId) =>
+    (await sessionRepository.listSessions(LOCAL_ORGANIZATION_ID, eventId))
+      .filter((session) => session.status.trim().toLowerCase() === "accepted")
+      .flatMap((session) =>
+        session.speakerIds.map((participantId) => ({
+          participantId,
+          sessionId: session.id,
+          title: session.title,
+          status: session.status,
+          version: session.version,
+        })),
+      ),
   );
   const deterministicAgendaSuggestions = new DeterministicAgendaSuggestionProvider();
   const agendaMutationLock = new InMemoryAgendaMutationLock();

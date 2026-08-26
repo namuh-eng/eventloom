@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import { portalRouteAuthorized } from "./portal-shell-model";
 import {
   authorizedFilesSessionOptions,
   compatibleFilesUploadTasks,
@@ -14,15 +15,15 @@ import {
 import type {
   PortalAsset,
   PortalResource,
-  PortalRosterEnvelope,
+  PortalSession,
   PortalSubmission,
   PortalTask,
   PortalWikiPage,
 } from "./types";
 
-const canonicalSessionId = "session-submission-priya";
-const accepted: PortalSubmission = {
-  id: "session-accepted",
+const canonicalSessionId = "session-priya";
+const acceptedCfpSubmission: PortalSubmission = {
+  id: "submission-priya",
   eventId: "event-1",
   title: "Reliable event operations",
   status: "accepted",
@@ -31,36 +32,11 @@ const accepted: PortalSubmission = {
   version: 3,
 };
 
-const otherAccepted: PortalSubmission = {
-  ...accepted,
-  id: "session-other",
-  title: "Another accepted session",
-  participantIds: ["speaker-1"],
-};
-
-const roster: PortalRosterEnvelope = {
-  organizationId: "org-1",
-  eventId: "event-1",
-  submissionId: accepted.id,
-  capabilities: { manage: true, invite: true },
-  members: [
-    {
-      participantId: "speaker-1",
-      displayName: "Priya Raman",
-      email: "priya@example.test",
-      role: "primary",
-      status: "active",
-      capabilities: { edit: false, remove: false },
-    },
-    {
-      participantId: "speaker-2",
-      displayName: "Marcus Okafor",
-      email: "marcus@example.test",
-      role: "co_speaker",
-      status: "active",
-      capabilities: { edit: true, remove: true },
-    },
-  ],
+const session: PortalSession = {
+  sessionId: canonicalSessionId,
+  title: "Reliable event operations",
+  status: "accepted",
+  version: 7,
 };
 
 const task: PortalTask = {
@@ -101,30 +77,52 @@ const asset: PortalAsset = {
 };
 
 describe("focused participant workspaces", () => {
-  it("keeps co-speaker roster attribution bound to the raw CFP submission ID", () => {
+  it("renders canonical sessions without treating CFP submissions as session IDs", () => {
     const markup = renderToStaticMarkup(
       createElement(SessionsWorkspaceView, {
         eventName: "North Summit",
-        sessions: [accepted, otherAccepted],
-        selectedSessionId: accepted.id,
-        roster,
+        sessions: [session],
+        selectedSessionId: canonicalSessionId,
         tasks: [],
         assets: [],
-        canManageRoster: true,
-        canInvite: true,
-        busyRoster: false,
         onSelectSession: vi.fn(),
-        onAddCoSpeaker: vi.fn(),
-        onUpdateCoSpeaker: vi.fn(),
-        onRemoveCoSpeaker: vi.fn(),
       }),
     );
 
-    expect(markup).toContain("Accepted session");
+    expect(canonicalSessionId).not.toBe(acceptedCfpSubmission.id);
     expect(markup).toContain("Reliable event operations");
-    expect(markup).toContain("Primary speaker");
-    expect(markup).toContain("Marcus Okafor");
-    expect(markup).not.toMatch(/remove[^<]*Priya Raman/iu);
+    expect(markup).toContain(`>${canonicalSessionId}<`);
+    expect(markup).toContain("Session version");
+    expect(markup).toContain(">7<");
+  });
+  it("admits invitation-backed profile access to Sessions but denies an ungranted shell", () => {
+    const profileSelf = (capability: string) => capability === "profile-self";
+    const noGrant = () => false;
+
+    expect(
+      portalRouteAuthorized({
+        pathname: "/portal",
+        workspace: "co-speakers",
+        submissionCount: 0,
+        can: profileSelf,
+      }),
+    ).toBe(true);
+    expect(
+      portalRouteAuthorized({
+        pathname: "/portal",
+        workspace: "co-speakers",
+        submissionCount: 1,
+        can: noGrant,
+      }),
+    ).toBe(false);
+    expect(
+      portalRouteAuthorized({
+        pathname: "/portal",
+        workspace: "co-speakers",
+        submissionCount: 0,
+        can: (capability) => capability === "roster-manage",
+      }),
+    ).toBe(false);
   });
 
   it("derives Files sessions from canonical task subjects and shows their task-bound family", () => {
@@ -157,7 +155,7 @@ describe("focused participant workspaces", () => {
         uploadTasks: [task],
       },
     ]);
-    expect(accepted.id).not.toBe(canonicalSessionId);
+    expect(acceptedCfpSubmission.id).not.toBe(canonicalSessionId);
     expect(markup).toContain("Files for Reliable event operations");
     expect(markup).toContain(`value="${canonicalSessionId}"`);
     expect(markup).toContain("reliable-operations.pdf");

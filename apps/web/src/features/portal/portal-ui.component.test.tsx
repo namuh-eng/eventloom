@@ -56,6 +56,7 @@ function portalStartupContext(eventId: string): PortalContext {
 function portalStartupView(context: PortalContext): PortalView {
   return {
     submissions: [],
+    sessions: [],
     profiles: [],
     tasks: [],
     outstandingTaskCount: 0,

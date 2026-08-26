@@ -58,6 +58,9 @@ class FakeSpeakerRepository implements SpeakerRepository {
       },
     );
   }
+  listPortalCanonicalSessions() {
+    return Promise.resolve([]);
+  }
 
   listSubmissions(eventId: string, submissionIds: readonly string[]): Promise<SpeakerSubmission[]> {
     return Promise.resolve(
@@ -378,6 +381,7 @@ class CountingOrganizerReadModelRepository extends OrganizerSpeakerRepository {
       tasks: resources.tasks === true ? this.tasks.filter((task) => task.eventId === eventId) : [],
       assets:
         resources.assets === true ? this.assets.filter((asset) => asset.eventId === eventId) : [],
+      canonicalSessions: [],
     });
   }
 
@@ -537,6 +541,9 @@ class CountingPortalRepository extends OrganizerSpeakerRepository {
   listPortalContexts(accountId: string): Promise<SpeakerPortalContext[]> {
     this.contextReads += 1;
     return Promise.resolve(accountId === "account-1" ? this.portalContexts : []);
+  }
+  listPortalCanonicalSessions() {
+    return Promise.resolve([]);
   }
 
   listAssets(eventId: string, participantIds: readonly string[]): Promise<SpeakerAsset[]> {
@@ -1475,12 +1482,7 @@ describe("SpeakerService organizer roster read model", () => {
     const shared = roster.speakers.find((speaker) => speaker.participantId === "participant-1");
     expect(shared).toMatchObject({
       displayName: "Shared Speaker",
-      sessions: [
-        {
-          submissionId: "speaker-submission:submission-1",
-          title: "Shared session",
-        },
-      ],
+      sessions: [],
       taskSummary: { total: 2, completed: 1, overdue: 0 },
       assets: [expect.objectContaining({ assetId: "asset-accepted" })],
     });
@@ -1641,6 +1643,7 @@ describe("SpeakerService organizer asset reads", () => {
       profiles: resources.profiles === true ? readModelRepository.profiles : [],
       tasks: [],
       assets: resources.assets === true ? readModelRepository.assets : [],
+      canonicalSessions: [],
     });
     const fallbackRepository = new OrganizerSpeakerRepository();
     configure(fallbackRepository);
@@ -2532,7 +2535,7 @@ describe("SpeakerService organizer speaker writes", () => {
         }),
       ]),
     );
-    expect(roster.speakers.every((speaker) => speaker.sessions.length === 1)).toBe(true);
+    expect(roster.speakers.every((speaker) => speaker.sessions.length === 0)).toBe(true);
     expect(repository.rosterEventReads).toBe(0);
   });
   it("does not issue download grants while constructing the organizer roster", async () => {

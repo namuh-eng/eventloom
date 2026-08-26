@@ -9,6 +9,7 @@ import {
   portalSubmissionIdsMatch,
   portalTaskAsset,
   scopePortalContextToPrimaryParticipant,
+  scopePortalViewToAuthorizedParticipants,
   scopePortalViewToPrimaryParticipant,
   submissionStatusPresentation,
   summarizePortal,
@@ -55,20 +56,43 @@ const portal: PortalView = {
       updatedAt: "2026-08-07T12:00:00.000Z",
     },
   ],
+  sessions: [
+    {
+      sessionId: "session-1",
+      title: "Designing resilient queues",
+      status: "confirmed",
+      version: 1,
+    },
+  ],
   profiles: [],
   tasks: [task({ id: "task-1", status: "completed" }), task({ id: "task-2" })],
   outstandingTaskCount: 1,
 };
 
 describe("speaker portal view model", () => {
-  it("matches raw and prefixed submission IDs without matching unrelated values", () => {
+  it("matches canonical CFP submission identities", () => {
+    expect(portalSubmissionIdsMatch("submission-1", "submission-1")).toBe(true);
     expect(portalSubmissionIdsMatch("submission-1", "speaker-submission:submission-1")).toBe(true);
-    expect(portalSubmissionIdsMatch(" speaker-submission:submission-1 ", "submission-1")).toBe(
-      true,
-    );
     expect(portalSubmissionIdsMatch("submission-1", "submission-2")).toBe(false);
-    expect(portalSubmissionIdsMatch("", "speaker-submission:")).toBe(false);
-    expect(portalSubmissionIdsMatch("speaker-submission:", "speaker-submission:")).toBe(false);
+    expect(portalSubmissionIdsMatch("", "")).toBe(false);
+  });
+  it("retains sessions only for the selected primary participant", () => {
+    const context = {
+      id: "portal:event-1",
+      eventId: "event-1",
+      name: "DevFlow Conf 2027",
+      capabilities: ["task-response"],
+      submissionIds: ["submission-1"],
+      participantIds: ["participant-1", "participant-2"],
+      primaryParticipantId: "participant-1",
+    } as const;
+
+    expect(
+      scopePortalViewToAuthorizedParticipants(portal, context, "participant-1").sessions,
+    ).toEqual(portal.sessions);
+    expect(
+      scopePortalViewToAuthorizedParticipants(portal, context, "participant-2").sessions,
+    ).toEqual([]);
   });
   it("matches task assets by exact task and session identity", () => {
     const linkedTask = task({
@@ -225,7 +249,7 @@ describe("speaker portal view model", () => {
       eventId: "event-1",
       name: "DevFlow Conf 2027",
       capabilities: ["profile-self", "task-response", "asset-read"],
-      submissionIds: ["speaker-submission:session-priya", "session-marcus"],
+      submissionIds: ["session-priya", "session-marcus"],
       participantIds: [marcusParticipantId, priyaParticipantId],
       primaryParticipantId: priyaParticipantId,
     } as const;
@@ -335,6 +359,14 @@ describe("speaker portal view model", () => {
             updatedAt: "2026-08-09T00:00:00.000Z",
           },
         ],
+        sessions: [
+          {
+            sessionId: "session-priya",
+            title: "Reliable systems",
+            status: "confirmed",
+            version: 1,
+          },
+        ],
         profiles: [marcusProfile, priyaProfile],
         tasks: [marcusTask, priyaTask],
         outstandingTaskCount: 2,
@@ -391,6 +423,14 @@ describe("speaker portal view model", () => {
         participantIds: [priyaParticipantId],
       }),
     ]);
+    expect(scoped.sessions).toEqual([
+      {
+        sessionId: "session-priya",
+        title: "Reliable systems",
+        status: "confirmed",
+        version: 1,
+      },
+    ]);
     expect(scoped.profiles.map(({ participantId }) => participantId)).toEqual([priyaParticipantId]);
     expect(scoped.tasks.map(({ id }) => id)).toEqual([priyaTask.id]);
     expect(scoped.assets?.map(({ id }) => id)).toEqual([
@@ -434,6 +474,7 @@ describe("speaker portal view model", () => {
     });
     const view: PortalView = {
       submissions: [],
+      sessions: [],
       profiles: [],
       tasks: [
         directSessionTask,

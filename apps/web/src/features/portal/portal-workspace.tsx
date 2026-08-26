@@ -94,15 +94,11 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
     workspaceError,
     mutationError,
     busyAssetIds,
-    busyRoster,
   } = portal;
-  const acceptedSessions = useMemo(
-    () => (view?.submissions ?? []).filter((submission) => submission.status === "accepted"),
-    [view],
-  );
-  const firstAcceptedSubmissionId = acceptedSessions[0]?.id ?? null;
+  const sessions = view?.sessions ?? [];
+  const firstSessionId = sessions[0]?.sessionId ?? null;
   const fileSessions = useMemo(() => authorizedFilesSessionOptions(view?.tasks ?? []), [view]);
-  const [selectedRosterSubmissionId, setSelectedRosterSubmissionId] = useState<string | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedFileSessionId, setSelectedFileSessionId] = useState<string | null>(null);
   const surface = surfaceFor(section);
 
@@ -111,8 +107,8 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
   }, [context, portal.loadWorkspace, view]);
 
   useEffect(() => {
-    setSelectedRosterSubmissionId(firstAcceptedSubmissionId);
-  }, [firstAcceptedSubmissionId]);
+    setSelectedSessionId(firstSessionId);
+  }, [firstSessionId]);
 
   useEffect(() => {
     setSelectedFileSessionId((current) => reconcileSelectedFileSessionId(current, fileSessions));
@@ -123,7 +119,7 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
       <WorkspaceState
         variant="empty"
         title="Loading your participant workspace"
-        description="Retrieving accepted sessions, private files, and published event guidance."
+        description="Retrieving sessions, private files, and published event guidance."
       />
     );
   }
@@ -146,7 +142,7 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
       <WorkspaceState
         variant="empty"
         title="Your speaker workspace is not open yet"
-        description="Track your proposal in My submissions. Sessions, tasks, and files unlock after an organizer accepts it."
+        description="Track your proposal in My submissions. Sessions appear after the event team grants your speaker access."
         action={
           <Button asChild>
             <Link href="/portal/submissions">View my submissions</Link>
@@ -156,12 +152,6 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
     );
   }
 
-  const selectedRoster = selectedRosterSubmissionId
-    ? workspace.rosters[selectedRosterSubmissionId]
-    : undefined;
-  const canManageRoster =
-    portal.can("roster-manage") && Boolean(selectedRoster?.capabilities.manage);
-  const canInvite = canManageRoster && Boolean(selectedRoster?.capabilities.invite);
   const participantId = context.primaryParticipantId ?? view.profiles[0]?.participantId ?? null;
   const workspaceQuery = new URLSearchParams(searchParams.toString());
   workspaceQuery.set("event", context.eventId);
@@ -183,7 +173,7 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
 
   return (
     <div className={styles.page}>
-      <nav className={styles.navigation} aria-label="Accepted session tools">
+      <nav className={styles.navigation} aria-label="Speaker workspace tools">
         {workspaceNavigation.map((item) => (
           <Link
             key={item.surface}
@@ -233,41 +223,11 @@ export function PortalWorkspace({ section }: Readonly<{ section: PortalWorkspace
       {surface === "sessions" ? (
         <SessionsWorkspaceView
           eventName={portalContextLabel(context)}
-          sessions={acceptedSessions}
-          selectedSessionId={selectedRosterSubmissionId}
-          roster={selectedRoster}
+          sessions={sessions}
+          selectedSessionId={selectedSessionId}
           tasks={view.tasks}
           assets={workspace.assets}
-          canManageRoster={canManageRoster}
-          canInvite={canInvite}
-          busyRoster={busyRoster}
-          onSelectSession={setSelectedRosterSubmissionId}
-          onAddCoSpeaker={(input) =>
-            selectedRosterSubmissionId
-              ? portal.addRosterEntry({
-                  submissionId: selectedRosterSubmissionId,
-                  role: "co_speaker",
-                  ...input,
-                })
-              : false
-          }
-          onUpdateCoSpeaker={(entry, displayName) =>
-            selectedRosterSubmissionId
-              ? portal.updateRosterEntry({
-                  submissionId: selectedRosterSubmissionId,
-                  participantId: entry.participantId,
-                  displayName,
-                })
-              : false
-          }
-          onRemoveCoSpeaker={(entry) =>
-            selectedRosterSubmissionId
-              ? portal.removeRosterEntry({
-                  submissionId: selectedRosterSubmissionId,
-                  participantId: entry.participantId,
-                })
-              : false
-          }
+          onSelectSession={setSelectedSessionId}
         />
       ) : null}
 

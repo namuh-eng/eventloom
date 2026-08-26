@@ -220,6 +220,7 @@ describe("D1SpeakerRepository", () => {
     const repository = withTestSpeakerOrganizerLifecycle({
       getAccessScope: async () => organizerScope,
       getOrganizerAccessScope: async () => organizerScope,
+      listPortalCanonicalSessions: async () => [],
       submissions: [acceptedSubmission],
       roster: [
         {

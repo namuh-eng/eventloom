@@ -4577,10 +4577,11 @@ components:
       additionalProperties: false
     PortalWorkspace:
       type: object
-      required: [context, submissions, tasks, resources, wiki]
+      required: [context, submissions, sessions, tasks, resources, wiki]
       properties:
         context: { $ref: "#/components/schemas/PortalContext" }
         submissions: { type: array, items: { $ref: "#/components/schemas/PortalSubmission" } }
+        sessions: { type: array, items: { $ref: "#/components/schemas/PortalSession" } }
         tasks: { type: array, items: { $ref: "#/components/schemas/PortalTask" } }
         assets: { type: array, items: { $ref: "#/components/schemas/PortalAsset" } }
         resources: { type: array, items: { $ref: "#/components/schemas/PortalResource" } }
@@ -4602,6 +4603,15 @@ components:
         status: { type: string, maxLength: 64 }
         version: { $ref: "#/components/schemas/Version" }
         canEdit: { type: boolean }
+      additionalProperties: false
+    PortalSession:
+      type: object
+      required: [sessionId, title, status, version]
+      properties:
+        sessionId: { $ref: "#/components/schemas/Identifier" }
+        title: { type: string, maxLength: 300 }
+        status: { type: string, maxLength: 64 }
+        version: { $ref: "#/components/schemas/Version" }
       additionalProperties: false
     RosterEntry:
       type: object
